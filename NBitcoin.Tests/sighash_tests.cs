@@ -10,43 +10,6 @@ namespace NBitcoin.Tests
 {
 	public class sighash_tests
 	{
-
-		static Random rand = new Random();
-
-		static Script RandomScript()
-		{
-			OpcodeType[] oplist = { OpcodeType.OP_FALSE, OpcodeType.OP_1, OpcodeType.OP_2, OpcodeType.OP_3, OpcodeType.OP_CHECKSIG, OpcodeType.OP_IF, OpcodeType.OP_VERIF, OpcodeType.OP_RETURN, OpcodeType.OP_CODESEPARATOR };
-			var script = new Script();
-			int ops = (rand.Next() % 10);
-			for(int i = 0; i < ops; i++)
-				script += oplist[rand.Next() % oplist.Length];
-
-			return script;
-		}
-
-
-		//Compare between new old implementation of signature in reference bitcoin. But NBitcoin is like the old one, so we don't care about this test
-		//[Fact]
-		//public void sighash_test()
-		//{
-
-		//	int nRandomTests = 50000;
-
-
-		//	for(int i = 0 ; i < nRandomTests ; i++)
-		//	{
-		//		int nHashType = rand.Next();
-		//		Transaction txTo = RandomTransaction((nHashType & 0x1f) == SigHash.Single);
-		//		Script scriptCode = RandomScript();
-		//		int nIn = rand.Next() % txTo.VIn.Length;
-
-		//		var sho = SignatureHashOld(scriptCode, txTo, nIn, nHashType);
-		//		var sh = scriptCode.SignatureHash(txTo, nIn, (SigHash)nHashType);
-
-		//		Assert.True(sh == sho);
-		//	}
-		//}
-
 		// Goal: check that SignatureHash generates correct hash
 		[Fact]
 		[Trait("Core", "Core")]
@@ -54,15 +17,15 @@ namespace NBitcoin.Tests
 		{
 			var tests = TestCase.read_json("data/sighash.json");
 
-			foreach(var test in tests)
+			foreach (var test in tests)
 			{
 				var strTest = test.ToString();
-				if(test.Count < 1) // Allow for extra stuff (useful for comments)
+				if (test.Count < 1) // Allow for extra stuff (useful for comments)
 				{
 					Assert.True(false, "Bad test: " + strTest);
 					continue;
 				}
-				if(test.Count == 1)
+				if (test.Count == 1)
 					continue; // comment
 
 				string raw_tx, raw_script, sigHashHex;

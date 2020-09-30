@@ -10,6 +10,7 @@ using NBitcoin.Protocol;
 using System.Runtime.ExceptionServices;
 using System.Threading.Tasks;
 using NBitcoin.BouncyCastle.Math;
+using System.Runtime.InteropServices;
 #if !NOSOCKET
 using System.Net.Sockets;
 #endif
@@ -23,6 +24,141 @@ namespace NBitcoin
 {
 	public static class Extensions
 	{
+#if HAS_SPAN
+		internal static Crypto.ECDSASignature Sign(this Secp256k1.ECPrivKey key, uint256 h, bool enforceLowR)
+		{
+			return new Crypto.ECDSASignature(key.Sign(h, enforceLowR, out _));
+		}
+		internal static Secp256k1.SecpECDSASignature Sign(this Secp256k1.ECPrivKey key, uint256 h, bool enforceLowR, out int recid)
+		{
+			Span<byte> hash = stackalloc byte[32];
+			h.ToBytes(hash);
+			byte[] extra_entropy = null;
+			Secp256k1.RFC6979NonceFunction nonceFunction = null;
+			Span<byte> vchSig = stackalloc byte[Secp256k1.SecpECDSASignature.MaxLength];
+			Secp256k1.SecpECDSASignature sig;
+			uint counter = 0;
+			bool ret = key.TrySignECDSA(hash, null, out recid, out sig);
+			// Grind for low R
+			while (ret && sig.r.IsHigh && enforceLowR)
+			{
+				if (extra_entropy == null || nonceFunction == null)
+				{
+					extra_entropy = new byte[32];
+					nonceFunction = new Secp256k1.RFC6979NonceFunction(extra_entropy);
+				}
+				Utils.ToBytes(++counter, true, extra_entropy.AsSpan());
+				ret = key.TrySignECDSA(hash, nonceFunction, out recid, out sig);
+			}
+			return sig;
+		}
+#endif
+		/// <summary>
+		/// Deriving an HDKey is normally time consuming, this wrap the IHDKey in a new HD object which can cache derivations
+		/// </summary>
+		/// <param name="hdkey">The hdKey to wrap</param>
+		/// <returns>An hdkey which cache derivations, of the parameter if it is already itself a cache</returns>
+		public static IHDKey AsHDKeyCache(this IHDKey hdkey)
+		{
+			if (hdkey == null)
+				throw new ArgumentNullException(nameof(hdkey));
+			if (hdkey is HDKeyCache c)
+				return c;
+			return new HDKeyCache(hdkey);
+		}
+		/// <summary>
+		/// Deriving an IHDScriptPubKey is normally time consuming, this wrap the IHDScriptPubKey in a new IHDScriptPubKey object which can cache derivations
+		/// </summary>
+		/// <param name="hdScriptPubKey">The hdScriptPubKey to wrap</param>
+		/// <returns>An hdkey which cache derivations, of the parameter if it is already itself a cache</returns>
+		public static IHDScriptPubKey AsHDKeyCache(this IHDScriptPubKey hdScriptPubKey)
+		{
+			if (hdScriptPubKey == null)
+				throw new ArgumentNullException(nameof(hdScriptPubKey));
+			if (hdScriptPubKey is HDScriptPubKeyCache c)
+				return c;
+			return new HDScriptPubKeyCache(hdScriptPubKey);
+		}
+
+		public static IHDScriptPubKey AsHDScriptPubKey(this IHDKey hdKey, ScriptPubKeyType type)
+		{
+			if (hdKey == null)
+				throw new ArgumentNullException(nameof(hdKey));
+			return new HDKeyScriptPubKey(hdKey, type);
+		}
+
+		public static IHDKey Derive(this IHDKey hdkey, uint index)
+		{
+			if (hdkey == null)
+				throw new ArgumentNullException(nameof(hdkey));
+			return hdkey.Derive(new KeyPath(index));
+		}
+
+		/// <summary>
+		/// Derive keyPaths as fast as possible using caching and parallelism
+		/// </summary>
+		/// <param name="hdkey">The hdKey to derive</param>
+		/// <param name="keyPaths">keyPaths to derive</param>
+		/// <returns>An array of keyPaths.Length size with the derived keys</returns>
+		public static IHDKey[] Derive(this IHDKey hdkey, KeyPath[] keyPaths)
+		{
+			if (hdkey == null)
+				throw new ArgumentNullException(nameof(hdkey));
+			if (keyPaths == null)
+				throw new ArgumentNullException(nameof(keyPaths));
+			var result = new IHDKey[keyPaths.Length];
+			var cache = (HDKeyCache)hdkey.AsHDKeyCache();
+#if !NOPARALLEL
+			Parallel.For(0, keyPaths.Length, i =>
+			{
+				result[i] = hdkey.Derive(keyPaths[i]);
+			});
+#else
+			for (int i = 0; i < keyPaths.Length; i++)
+			{
+				result[i] = hdkey.Derive(keyPaths[i]);
+			}
+#endif
+			return result;
+		}
+		public static async Task WithCancellation(this Task task, CancellationToken cancellationToken)
+		{
+			using (var delayCTS = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+			{
+				var waiting = Task.Delay(-1, delayCTS.Token);
+				var doing = task;
+				if (await Task.WhenAny(waiting, doing).ConfigureAwait(false) == waiting)
+				{
+#pragma warning disable CS4014
+					// Need to handle potential exception unhandled later, the original exception is not yet finished
+					doing.ContinueWith(_ => _?.Exception?.Handle((e) => true));
+#pragma warning restore CS4014
+				}
+				delayCTS.Cancel();
+				cancellationToken.ThrowIfCancellationRequested();
+				await doing.ConfigureAwait(false);
+			}
+		}
+
+		public static async Task<T> WithCancellation<T>(this Task<T> task, CancellationToken cancellationToken)
+		{
+			using (var delayCTS = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+			{
+				var waiting = Task.Delay(-1, delayCTS.Token);
+				var doing = task;
+				if (await Task.WhenAny(waiting, doing).ConfigureAwait(false) == waiting)
+				{
+#pragma warning disable CS4014
+					// Need to handle potential exception unhandled later, the original exception is not yet finished
+					doing.ContinueWith(_ => _?.Exception?.Handle((e) => true));
+#pragma warning restore CS4014
+				}
+				delayCTS.Cancel();
+				cancellationToken.ThrowIfCancellationRequested();
+				return await doing.ConfigureAwait(false);
+			}
+		}
+
 		public static Block GetBlock(this IBlockRepository repository, uint256 blockId)
 		{
 			return repository.GetBlockAsync(blockId).GetAwaiter().GetResult();
@@ -370,7 +506,6 @@ namespace NBitcoin
 
 	public class Utils
 	{
-
 		internal static void SafeSet(ManualResetEvent ar)
 		{
 			try
@@ -448,6 +583,18 @@ namespace NBitcoin
 			 ipv4Bytes [0], ipv4Bytes [1], ipv4Bytes [2], ipv4Bytes [3]
 			 };
 			return new IPAddress(ipv6Bytes);
+
+		}
+		internal static IPAddress MapToIPv4(IPAddress address)
+		{
+			if (address.AddressFamily == AddressFamily.InterNetwork)
+				return address;
+			if (address.AddressFamily != AddressFamily.InterNetworkV6)
+				throw new Exception("Only AddressFamily.InterNetworkV6 can be converted to IPv4");
+			if (!address.IsIPv4MappedToIPv6Ex())
+				throw new Exception("This is not a mapped IPv4");
+			byte[] ipv6Bytes = address.GetAddressBytes();
+			return new IPAddress(new[] { ipv6Bytes[12], ipv6Bytes[13], ipv6Bytes[14], ipv6Bytes[15] });
 
 		}
 
@@ -592,20 +739,24 @@ namespace NBitcoin
 				arr[fromIndex] = to;
 			}
 		}
-		public static void Shuffle<T>(List<T> arr, Random rand)
+		public static void Shuffle<T>(List<T> arr, int start, Random rand)
 		{
 			rand = rand ?? new Random();
-			for (int i = 0; i < arr.Count; i++)
+			for (int i = start; i < arr.Count; i++)
 			{
-				var fromIndex = rand.Next(arr.Count);
+				var fromIndex = rand.Next(start, arr.Count);
 				var from = arr[fromIndex];
 
-				var toIndex = rand.Next(arr.Count);
+				var toIndex = rand.Next(start, arr.Count);
 				var to = arr[toIndex];
 
 				arr[toIndex] = from;
 				arr[fromIndex] = to;
 			}
+		}
+		public static void Shuffle<T>(List<T> arr, Random rand)
+		{
+			Shuffle(arr, 0, rand);
 		}
 		public static void Shuffle<T>(T[] arr, int seed)
 		{
@@ -647,6 +798,14 @@ namespace NBitcoin
 #endif
 		public static byte[] ToBytes(uint value, bool littleEndian)
 		{
+#if HAS_SPAN
+			if (littleEndian && BitConverter.IsLittleEndian)
+			{
+				var result = new byte[4];
+				MemoryMarshal.Cast<byte, uint>(result)[0] = value;
+				return result;
+			}
+#endif
 			if (littleEndian)
 			{
 				return new byte[]
@@ -669,10 +828,56 @@ namespace NBitcoin
 			}
 		}
 
+		public static byte[] ToBytes(ulong value, bool littleEndian)
+		{
+#if HAS_SPAN
+			if (littleEndian && BitConverter.IsLittleEndian)
+			{
+				var result = new byte[8];
+				MemoryMarshal.Cast<byte, ulong>(result)[0] = value;
+				return result;
+			}
+#endif
+			if (littleEndian)
+			{
+				return new byte[]
+				{
+					(byte)value,
+					(byte)(value >> 8),
+					(byte)(value >> 16),
+					(byte)(value >> 24),
+					(byte)(value >> 32),
+					(byte)(value >> 40),
+					(byte)(value >> 48),
+					(byte)(value >> 56),
+				};
+			}
+			else
+			{
+				return new byte[]
+				{
+					(byte)(value >> 56),
+					(byte)(value >> 48),
+					(byte)(value >> 40),
+					(byte)(value >> 32),
+					(byte)(value >> 24),
+					(byte)(value >> 16),
+					(byte)(value >> 8),
+					(byte)value,
+				};
+			}
+		}
+
 #if HAS_SPAN
 		public static void ToBytes(uint value, bool littleEndian, Span<byte> output)
 		{
-			if(littleEndian)
+			if (littleEndian && BitConverter.IsLittleEndian)
+			{
+				MemoryMarshal.Cast<byte, uint>(output)[0] = value;
+				return;
+			}
+
+			if (littleEndian)
 			{
 				output[0] = (byte)value;
 				output[1] = (byte)(value >> 8);
@@ -687,42 +892,47 @@ namespace NBitcoin
 				output[3] = (byte)value;
 			}
 		}
-#endif
-
-		public static byte[] ToBytes(ulong value, bool littleEndian)
+		public static void ToBytes(ulong value, bool littleEndian, Span<byte> output)
 		{
+			if (littleEndian && BitConverter.IsLittleEndian)
+			{
+				MemoryMarshal.Cast<byte, ulong>(output)[0] = value;
+				return;
+			}
+
 			if (littleEndian)
 			{
-				return new byte[]
-				{
-					(byte)value,
-					(byte)(value >> 8),
-					(byte)(value >> 16),
-					(byte)(value >> 24),
-					(byte)(value >> 32),
-					(byte)(value >> 40),
-					(byte)(value >> 48),
-					(byte)(value >> 56),
-				};
+				output[0] = (byte)value;
+				output[1] = (byte)(value >> 8);
+				output[2] = (byte)(value >> 16);
+				output[3] = (byte)(value >> 24);
+				output[4] = (byte)(value >> 32);
+				output[5] = (byte)(value >> 40);
+				output[6] = (byte)(value >> 48);
+				output[7] = (byte)(value >> 56);
 			}
 			else
 			{
-				return new byte[]
-				{
-					(byte)(value >> 56),
-					(byte)(value >> 48),
-					(byte)(value >> 40),
-					(byte)(value >> 32),
-					(byte)(value >> 24),
-					(byte)(value >> 16),
-					(byte)(value >> 8),
-					(byte)value,
-				};
+				output[0] = (byte)(value >> 56);
+				output[1] = (byte)(value >> 48);
+				output[2] = (byte)(value >> 40);
+				output[3] = (byte)(value >> 32);
+				output[4] = (byte)(value >> 24);
+				output[5] = (byte)(value >> 16);
+				output[6] = (byte)(value >> 8);
+				output[7] = (byte)value;
 			}
 		}
+#endif
 
 		public static uint ToUInt32(byte[] value, int index, bool littleEndian)
 		{
+#if HAS_SPAN
+			if (littleEndian && BitConverter.IsLittleEndian)
+			{
+				return MemoryMarshal.Cast<byte, uint>(value.AsSpan().Slice(index))[0];
+			}
+#endif
 			if (littleEndian)
 			{
 				return value[index]
@@ -739,21 +949,25 @@ namespace NBitcoin
 			}
 		}
 #if HAS_SPAN
-		public static uint ToUInt32(ReadOnlySpan<byte> value, int index, bool littleEndian)
+		public static uint ToUInt32(ReadOnlySpan<byte> value, bool littleEndian)
 		{
-			if(littleEndian)
+			if (littleEndian && BitConverter.IsLittleEndian)
 			{
-				return value[index]
-					   + ((uint)value[index + 1] << 8)
-					   + ((uint)value[index + 2] << 16)
-					   + ((uint)value[index + 3] << 24);
+				return MemoryMarshal.Cast<byte, uint>(value)[0];
+			}
+			if (littleEndian)
+			{
+				return value[0]
+					   + ((uint)value[1] << 8)
+					   + ((uint)value[2] << 16)
+					   + ((uint)value[3] << 24);
 			}
 			else
 			{
-				return value[index + 3]
-					   + ((uint)value[index + 2] << 8)
-					   + ((uint)value[index + 1] << 16)
-					   + ((uint)value[index + 0] << 24);
+				return value[3]
+					   + ((uint)value[2] << 8)
+					   + ((uint)value[1] << 16)
+					   + ((uint)value[0] << 24);
 			}
 		}
 #endif
@@ -768,8 +982,45 @@ namespace NBitcoin
 		{
 			return ToUInt32(value, 0, littleEndian);
 		}
-		public static ulong ToUInt64(byte[] value, bool littleEndian)
+
+		public static ulong ToUInt64(byte[] value, int offset, bool littleEndian)
 		{
+#if HAS_SPAN
+			if (littleEndian && BitConverter.IsLittleEndian)
+			{
+				return MemoryMarshal.Cast<byte, ulong>(value.AsSpan().Slice(offset))[0];
+			}
+#endif
+			if (littleEndian)
+			{
+				return value[offset + 0]
+					   + ((ulong)value[offset + 1] << 8)
+					   + ((ulong)value[offset + 2] << 16)
+					   + ((ulong)value[offset + 3] << 24)
+					   + ((ulong)value[offset + 4] << 32)
+					   + ((ulong)value[offset + 5] << 40)
+					   + ((ulong)value[offset + 6] << 48)
+					   + ((ulong)value[offset + 7] << 56);
+			}
+			else
+			{
+				return value[offset + 7]
+					+ ((ulong)value[offset + 6] << 8)
+					+ ((ulong)value[offset + 5] << 16)
+					+ ((ulong)value[offset + 4] << 24)
+					+ ((ulong)value[offset + 3] << 32)
+					   + ((ulong)value[offset + 2] << 40)
+					   + ((ulong)value[offset + 1] << 48)
+					   + ((ulong)value[offset + 0] << 56);
+			}
+		}
+#if HAS_SPAN
+		public static ulong ToUInt64(ReadOnlySpan<byte> value, bool littleEndian)
+		{
+			if (littleEndian && BitConverter.IsLittleEndian)
+			{
+				return MemoryMarshal.Cast<byte, ulong>(value)[0];
+			}
 			if (littleEndian)
 			{
 				return value[0]
@@ -793,9 +1044,70 @@ namespace NBitcoin
 					   + ((ulong)value[0] << 56);
 			}
 		}
+#endif
+
+		public static ulong ToUInt64(byte[] value, bool littleEndian)
+		{
+			return ToUInt64(value, 0, littleEndian);
+		}
 
 
 #if !NOSOCKET
+
+		public static bool TryParseEndpoint(string hostPort, int defaultPort, out EndPoint endpoint)
+		{
+			if (hostPort == null)
+				throw new ArgumentNullException(nameof(hostPort));
+			if (defaultPort < 0 || defaultPort > ushort.MaxValue)
+				throw new ArgumentOutOfRangeException(nameof(defaultPort));
+			hostPort = hostPort.Trim();
+			endpoint = null;
+			ushort port = (ushort)defaultPort;
+			string host = hostPort;
+			var index = hostPort.LastIndexOf(':');
+			if (index != -1)
+			{
+				var index2 = hostPort.IndexOf(':');
+				if (index2 == index || hostPort.IndexOf(']') != -1)
+				{
+					var portStr = hostPort.Substring(index + 1);
+					if (ushort.TryParse(portStr, out port))
+					{
+						host = hostPort.Substring(0, index);
+					}
+					else
+					{
+						port = (ushort)defaultPort;
+					}
+				}
+				else // At least two ':', this should be considered IPv6 without port
+				{
+					port = (ushort)defaultPort;
+				}
+			}
+			if (IPAddress.TryParse(host, out var address))
+			{
+				endpoint = new IPEndPoint(address, port);
+			}
+			else
+			{
+				if (Uri.CheckHostName(host) != UriHostNameType.Dns ||
+					// An host name with a length higher than 255 can't be resolved by DNS
+					host.Length > 255)
+					return false;
+				endpoint = new DnsEndPoint(host, port);
+			}
+			return true;
+		}
+
+		public static EndPoint ParseEndpoint(string hostPort, int defaultPort)
+		{
+			if (!TryParseEndpoint(hostPort, defaultPort, out var endpoint))
+				throw new FormatException("Invalid IP or DNS endpoint");
+			return endpoint;
+		}
+
+		[Obsolete("Use TryParseEndpoint or ParseEndpoint instead")]
 		public static IPEndPoint ParseIpEndpoint(string endpoint, int defaultPort)
 		{
 			return ParseIpEndpoint(endpoint, defaultPort, true);

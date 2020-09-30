@@ -1,8 +1,13 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using NBitcoin.BouncyCastle.Math;
 using NBitcoin.Crypto;
 using NBitcoin.DataEncoders;
+#if HAS_SPAN
+using NBitcoin.Secp256k1;
+#endif
 using Xunit;
 
 namespace NBitcoin.Tests
@@ -10,6 +15,53 @@ namespace NBitcoin.Tests
 	[Trait("UnitTest", "UnitTest")]
 	public class SchnorrSignerTests
 	{
+#if HAS_SPAN
+		[Fact]
+		public void BIP140Tests()
+		{
+			var content = File.ReadAllText("data/bip340_vectors.csv");
+			var lines = content.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries).Skip(1).ToArray();
+			foreach (var line in lines)
+			{
+				var fields = line.Split(',');
+				if (fields[0] == "5" || fields[0] == "14") // pubkey not on the field
+				{
+					Assert.False(Context.Instance.TryCreateXOnlyPubKey(Encoders.Hex.DecodeData(fields[2]), out _));
+					continue;
+				}
+				var expectedPubKey = Context.Instance.CreateXOnlyPubKey(Encoders.Hex.DecodeData(fields[2]));
+				if (fields[1] != "")
+				{
+					var key = Context.Instance.CreateECPrivKey(Encoders.Hex.DecodeData(fields[1]));
+					var actualPubKey = key.CreateXOnlyPubKey();
+					Assert.Equal(expectedPubKey, actualPubKey);
+				}
+				var msg = Encoders.Hex.DecodeData(fields[4]);
+				if (fields[0] == "12" || fields[0] == "13") // invalid sig
+				{
+					Assert.False(SecpSchnorrSignature.TryCreate(Encoders.Hex.DecodeData(fields[5]), out _));
+					continue;
+				}
+				Assert.True(SecpSchnorrSignature.TryCreate(Encoders.Hex.DecodeData(fields[5]), out var sig));
+				var actual = expectedPubKey.SigVerifyBIP340(sig, msg);
+				var expectedGoodSig = fields[6] == "TRUE";
+				Assert.Equal(expectedGoodSig, actual);
+				if (fields[1] != "")
+				{
+					var aux = Encoders.Hex.DecodeData(fields[3]);
+					var key = Context.Instance.CreateECPrivKey(Encoders.Hex.DecodeData(fields[1]));
+					var actualSig = key.SignBIP140(msg, aux);
+					Assert.True(expectedPubKey.SigVerifyBIP340(actualSig, msg));
+					if (expectedGoodSig)
+					{
+						var buf = new byte[64];
+						actualSig.WriteToSpan(buf);
+						Assert.Equal(fields[5].ToLowerInvariant(), Encoders.Hex.EncodeData(buf));
+					}
+				}
+			}
+		}
+#endif
 		[Fact]
 		public void SingningTest()
 		{
@@ -28,34 +80,37 @@ namespace NBitcoin.Tests
 					"C90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B14E5C7",
 					"03FAC2114C2FBB091527EB7C64ECB11F8021CB45E8E7809D3C0938E4B8C0E5F84B",
 					"5E2D58D8B3BCDF1ABADEC7829054F90DDA9805AAB56C77333024B9D0A508B75C",
-					"00DA9B08172A9B6F0466A2DEFD817F2D7AB437E0D253CB5395A963866B3574BE00880371D01766935B92D2AB4CD5C8A2A5837EC57FED7660773A05F0DE142380"} 
+					"00DA9B08172A9B6F0466A2DEFD817F2D7AB437E0D253CB5395A963866B3574BE00880371D01766935B92D2AB4CD5C8A2A5837EC57FED7660773A05F0DE142380"}
 			};
-			var signer = new SchnorrSigner();
 
-			foreach(var vector in vectors)
+			foreach (var vector in vectors)
 			{
-				var privatekey= new Key(Encoders.Hex.DecodeData(vector[1]));
-				var publicKey= new PubKey(Encoders.Hex.DecodeData(vector[2]));
-				var message= uint256.Parse(vector[3]);
-				var expectedSignature= SchnorrSignature.Parse(vector[4]);
+				var privatekey = new Key(Encoders.Hex.DecodeData(vector[1]));
+				var publicKey = new PubKey(Encoders.Hex.DecodeData(vector[2]));
+				var message = Parseuint256(vector[3]);
+				var expectedSignature = SchnorrSignature.Parse(vector[4]);
 
-				var signature = signer.Sign(message, privatekey);
+				var signature = privatekey.SignSchnorr(message);
 				Assert.Equal(expectedSignature.ToBytes(), signature.ToBytes());
 
-				Assert.True(signer.Verify(message, publicKey, signature));
-				Assert.True(signer.Verify(message, privatekey.PubKey, signature));
+				Assert.True(publicKey.Verify(message, expectedSignature));
+				Assert.True(privatekey.PubKey.Verify(message, expectedSignature));
 			}
 		}
 
 		[Fact]
 		public void ShouldPassVerifycation()
 		{
-			var publicKey= new PubKey(Encoders.Hex.DecodeData("03DEFDEA4CDB677750A420FEE807EACF21EB9898AE79B9768766E4FAA04A2D4A34"));
-			var message= uint256.Parse("4DF3C3F68FCC83B27E9D42C90431A72499F17875C81A599B566C9889B9696703");
-			var signature= SchnorrSignature.Parse("00000000000000000000003B78CE563F89A0ED9414F5AA28AD0D96D6795F9C6302A8DC32E64E86A333F20EF56EAC9BA30B7246D6D25E22ADB8C6BE1AEB08D49D");            
+			var publicKey = new PubKey(Encoders.Hex.DecodeData("03DEFDEA4CDB677750A420FEE807EACF21EB9898AE79B9768766E4FAA04A2D4A34"));
+			var message = Parseuint256("4DF3C3F68FCC83B27E9D42C90431A72499F17875C81A599B566C9889B9696703");
+			var signature = SchnorrSignature.Parse("00000000000000000000003B78CE563F89A0ED9414F5AA28AD0D96D6795F9C6302A8DC32E64E86A333F20EF56EAC9BA30B7246D6D25E22ADB8C6BE1AEB08D49D");
+			Assert.True(publicKey.Verify(message, signature));
+		}
 
-			var signer = new SchnorrSigner();
-			Assert.True(signer.Verify(message, publicKey, signature));
+		private uint256 Parseuint256(string hex)
+		{
+			var message = uint256.Parse(hex);
+			return new uint256(message.ToBytes(false));
 		}
 
 		[Fact]
@@ -64,7 +119,7 @@ namespace NBitcoin.Tests
 			var vectors = new string[][]{
 				new []{"Test vector 5",
 					"02DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659",
-					"243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89", 
+					"243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89",
 					"2A298DACAE57395A15D0795DDBFD1DCB564DA82B0F269BC70A74F8220429BA1DFA16AEE06609280A19B67A24E1977E4697712B5FD2943914ECD5F730901B4AB7",
 					"incorrect R residuosity"},
 				new []{"Test vector 6",
@@ -84,19 +139,18 @@ namespace NBitcoin.Tests
 					"negated public key"}
 			};
 
-			var signer = new SchnorrSigner();
-
-			foreach(var vector in vectors)
+			foreach (var vector in vectors)
 			{
-				var publicKey= new PubKey(Encoders.Hex.DecodeData(vector[1]));
-				var message= uint256.Parse(vector[2]);
-				var signature= SchnorrSignature.Parse(vector[3]);
+				var publicKey = new PubKey(Encoders.Hex.DecodeData(vector[1]));
+				var message = uint256.Parse(vector[2]);
+				var expectedSignature = SchnorrSignature.Parse(vector[3]);
 				var reason = vector[4];
 
-				Assert.False(signer.Verify(message, publicKey, signature), reason);
+				Assert.False(publicKey.Verify(message, expectedSignature), reason);
 			}
 		}
 
+#if !HAS_SPAN
 		[Fact]
 		public void ShouldPassBatchVerifycation()
 		{
@@ -112,16 +166,17 @@ namespace NBitcoin.Tests
 				new []{
 					"03FAC2114C2FBB091527EB7C64ECB11F8021CB45E8E7809D3C0938E4B8C0E5F84B",
 					"5E2D58D8B3BCDF1ABADEC7829054F90DDA9805AAB56C77333024B9D0A508B75C",
-					"00DA9B08172A9B6F0466A2DEFD817F2D7AB437E0D253CB5395A963866B3574BE00880371D01766935B92D2AB4CD5C8A2A5837EC57FED7660773A05F0DE142380"} 
+					"00DA9B08172A9B6F0466A2DEFD817F2D7AB437E0D253CB5395A963866B3574BE00880371D01766935B92D2AB4CD5C8A2A5837EC57FED7660773A05F0DE142380"}
 			};
-	
-			var messages = vectors.Select(v => uint256.Parse(v[1])).ToArray();
-			var pubkeys = vectors.Select(v=>new PubKey(Encoders.Hex.DecodeData(v[0]))).ToArray();
-			var signatures = vectors.Select(v=> SchnorrSignature.Parse(v[2])).ToArray();
-			
-			var randoms = Enumerable.Range(0, 2).Select(x=> BigInteger.Arbitrary(256)).ToArray();
+
+			var messages = vectors.Select(v => Parseuint256(v[1])).ToArray();
+			var pubkeys = vectors.Select(v => new PubKey(Encoders.Hex.DecodeData(v[0]))).ToArray();
+			var signatures = vectors.Select(v => SchnorrSignature.Parse(v[2])).ToArray();
+
+			var randoms = Enumerable.Range(0, 2).Select(x => BigInteger.Arbitrary(256)).ToArray();
 			var ok = SchnorrSigner.BatchVerify(messages, pubkeys, signatures, randoms);
 			Assert.True(ok);
 		}
+#endif
 	}
 }

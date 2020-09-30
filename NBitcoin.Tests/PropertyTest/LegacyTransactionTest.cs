@@ -24,14 +24,14 @@ namespace NBitcoin.Tests.PropertyTest
 			string hex = tx.ToHex();
 			var tx2 = Transaction.Parse(hex, param.Item2);
 
-			return tx.GetHash() == tx.GetHash();
+			return tx.GetHash() == tx2.GetHash();
 		}
 
 		[Property(MaxTest = 100)]
 		[Trait("UnitTest", "UnitTest")]
 		public bool TxIdMustMatchHexSha256(Transaction tx)
 		{
-			return tx.GetHash() == Hashes.Hash256(tx.ToBytes());
+			return tx.GetHash() == Hashes.DoubleSHA256(tx.ToBytes());
 		}
 
 	}

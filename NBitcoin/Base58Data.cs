@@ -22,8 +22,13 @@ namespace NBitcoin
 	/// </summary>
 	public abstract class Base58Data : IBase58Data
 	{
+#if HAS_SPAN
+		protected byte[] vchData = Array.Empty<byte>();
+		protected ReadOnlyMemory<byte> vchVersion;
+#else
 		protected byte[] vchData = new byte[0];
 		protected byte[] vchVersion = new byte[0];
+#endif
 		protected string wifData = "";
 		private Network _Network;
 		public Network Network
@@ -42,7 +47,7 @@ namespace NBitcoin
 
 		protected Base58Data(byte[] rawBytes, Network network)
 		{
-			if(network == null)
+			if (network == null)
 				throw new ArgumentNullException(nameof(network));
 			_Network = network;
 			SetData(rawBytes);
@@ -53,21 +58,36 @@ namespace NBitcoin
 		}
 		private void SetString<T>(string psz) where T : Base58Data
 		{
-			if(_Network == null)
+			if (_Network == null)
 			{
 				_Network = Network.GetNetworkFromBase58Data(psz, Type);
-				if(_Network == null)
+				if (_Network == null)
 					throw new FormatException("Invalid " + this.GetType().Name);
 			}
 
 			byte[] vchTemp = _Network.NetworkStringParser.GetBase58CheckEncoder().DecodeData(psz);
-			var expectedVersion = _Network.GetVersionBytes(Type, true);
+#if HAS_SPAN
+			if (!(_Network.GetVersionMemory(Type, false) is ReadOnlyMemory<byte> expectedVersion))
+				throw new FormatException("Invalid " + this.GetType().Name);
+#else
+			var expectedVersion = _Network.GetVersionBytes(Type, false);
+			if (expectedVersion is null)
+				throw new FormatException("Invalid " + this.GetType().Name);
+#endif
 
-
+#if HAS_SPAN
+			var vchTempMemory = vchTemp.AsMemory();
+			vchVersion = vchTempMemory.Slice(0, expectedVersion.Length);
+#else
 			vchVersion = vchTemp.SafeSubarray(0, expectedVersion.Length);
-			if(!Utils.ArrayEqual(vchVersion, expectedVersion))
+#endif
+#if HAS_SPAN
+			if (!vchVersion.Span.SequenceEqual(expectedVersion.Span))
+#else
+			if (!Utils.ArrayEqual(vchVersion, expectedVersion))
+#endif
 			{
-				if(_Network.NetworkStringParser.TryParse(psz, Network, out T other))
+				if (_Network.NetworkStringParser.TryParse(psz, Network, out T other))
 				{
 					this.vchVersion = other.vchVersion;
 					this.vchData = other.vchData;
@@ -80,11 +100,15 @@ namespace NBitcoin
 			}
 			else
 			{
+#if HAS_SPAN
+				vchData = vchTempMemory.Slice(expectedVersion.Length).ToArray();
+#else
 				vchData = vchTemp.SafeSubarray(expectedVersion.Length);
+#endif
 				wifData = psz;
 			}
 
-			if(!IsValid)
+			if (!IsValid)
 				throw new FormatException("Invalid " + this.GetType().Name);
 
 		}
@@ -93,10 +117,21 @@ namespace NBitcoin
 		private void SetData(byte[] vchData)
 		{
 			this.vchData = vchData;
-			this.vchVersion = _Network.GetVersionBytes(Type, true);
+#if HAS_SPAN
+			if (!(_Network.GetVersionMemory(Type, false) is ReadOnlyMemory<byte> v))
+				throw new FormatException("Invalid " + this.GetType().Name);
+			this.vchVersion = v;
+			Span<byte> buffer = vchVersion.Length + vchData.Length is int length &&
+								length > 256 ? new byte[length] : stackalloc byte[length];
+			this.vchVersion.Span.CopyTo(buffer);
+			this.vchData.CopyTo(buffer.Slice(this.vchVersion.Length));
+			wifData = _Network.NetworkStringParser.GetBase58CheckEncoder().EncodeData(buffer);
+#else
+			this.vchVersion = _Network.GetVersionBytes(Type, false);
 			wifData = _Network.NetworkStringParser.GetBase58CheckEncoder().EncodeData(vchVersion.Concat(vchData).ToArray());
+#endif
 
-			if(!IsValid)
+			if (!IsValid)
 				throw new FormatException("Invalid " + this.GetType().Name);
 		}
 
@@ -132,15 +167,15 @@ namespace NBitcoin
 		public override bool Equals(object obj)
 		{
 			Base58Data item = obj as Base58Data;
-			if(item == null)
+			if (item == null)
 				return false;
 			return ToString().Equals(item.ToString());
 		}
 		public static bool operator ==(Base58Data a, Base58Data b)
 		{
-			if(System.Object.ReferenceEquals(a, b))
+			if (System.Object.ReferenceEquals(a, b))
 				return true;
-			if(((object)a == null) || ((object)b == null))
+			if (((object)a == null) || ((object)b == null))
 				return false;
 			return a.ToString() == b.ToString();
 		}

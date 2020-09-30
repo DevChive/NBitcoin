@@ -3,6 +3,7 @@ using System.Linq;
 using System.Text;
 using NBitcoin.DataEncoders;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace NBitcoin.Tests
 {
@@ -12,10 +13,28 @@ namespace NBitcoin.Tests
 		private static string[] VALID_CHECKSUM =
 		{
 			"A12UEL5L",
+			"a12uel5l",
 			"an83characterlonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1tt5tgs",
 			"abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw",
 			"11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j",
-			"split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w"
+			"split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w",
+			"?1ezyfcl"
+		};
+
+		private static string[] INVALID_CHECKSUM =
+		{
+			(char)0x20 + "1nwldj5", // HRP character out of range
+			(char)0x7F + "1axkwrx", // HRP character out of range
+			(char)0x80 + "1eym55h", // HRP character out of range
+			"an84characterslonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1569pvx", // overall max length exceeded
+			"pzry9x0s0muk", // No separator character
+			"1pzry9x0s0muk", // Empty HRP
+			"x1b4n0q5v", // Invalid data character
+			"li1dgmt3", // Too short checksum
+			"de1lg7wt" + (char)0xFF, // Invalid character in checksum
+			"A1G7SGD8", // checksum calculated with uppercase form of HRP
+			"10a06t8", // empty HRP
+			"1qzzfhee", // empty HRP
 		};
 
 		private static string[][] VALID_ADDRESS = {
@@ -52,26 +71,36 @@ namespace NBitcoin.Tests
 			Assert.Equal(2, ex.ErrorIndexes.Length);
 			Assert.Equal(8, ex.ErrorIndexes[0]);
 			Assert.Equal(12, ex.ErrorIndexes[1]);
+
+			var bech2 = Encoders.Bech32("tb");
+			Assert.Throws<FormatException>(() => bech2.Decode("tb1qdtpzu24mlyz3k0vrqxyntq0xqdqva7zxm7r485tb1qdtpzu24mlyz3k0vrqxyntq0xqdqva7zxm7r485", out wit));
 		}
 
 		[Fact]
-		public void ValidateValidChecksum()
+		public void DetectInvalidChecksum()
 		{
-			foreach(var test in VALID_CHECKSUM)
+			foreach (var test in INVALID_CHECKSUM)
 			{
-				var bech = Bech32Encoder.ExtractEncoderFromString(test);
-				var pos = test.LastIndexOf('1');
-				var test2 = test.Substring(0, pos + 1) + ((test[pos + 1]) ^ 1) + test.Substring(pos + 2);
-				Assert.Throws<FormatException>(() => bech.DecodeData(test2));
+				try
+				{
+					var bech = Bech32Encoder.ExtractEncoderFromString(test);
+					var pos = test.LastIndexOf('1');
+					var test2 = test.Substring(0, pos + 1) + ((test[pos + 1]) ^ 1) + test.Substring(pos + 2);
+					bech.Decode(test2, out var wit);
+					throw new Exception($"The \"{test}\" string was recognized as a valid bech32 encoded string. FormatException was expected.");
+				}
+				catch (FormatException)
+				{ }
 			}
 		}
 
 		Bech32Encoder bech32 = Encoders.Bech32("bc");
 		Bech32Encoder tbech32 = Encoders.Bech32("tb");
+
 		[Fact]
 		public void ValidAddress()
 		{
-			foreach(var address in VALID_ADDRESS)
+			foreach (var address in VALID_ADDRESS)
 			{
 				byte witVer;
 				byte[] witProg;
@@ -99,19 +128,19 @@ namespace NBitcoin.Tests
 		[Fact]
 		public void InvalidAddress()
 		{
-			foreach(var test in INVALID_ADDRESS)
+			foreach (var test in INVALID_ADDRESS)
 			{
 				byte witver;
 				try
 				{
 					bech32.Decode(test, out witver);
 				}
-				catch(FormatException) { }
+				catch (FormatException) { }
 				try
 				{
 					tbech32.Decode(test, out witver);
 				}
-				catch(FormatException) { }
+				catch (FormatException) { }
 			}
 		}
 
