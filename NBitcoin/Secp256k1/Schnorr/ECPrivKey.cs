@@ -136,37 +136,42 @@ namespace NBitcoin.Secp256k1
 	{
 		public SecpSchnorrSignature SignSchnorr(ReadOnlySpan<byte> msg32)
 		{
-			if (TrySignSchnorr(msg32, null, out _, out var sig) && sig is SecpSchnorrSignature)
+			if (TrySignSchnorr(msg32, null, out _, out var sig))
 				return sig;
 			throw new InvalidOperationException("Schnorr signature failed, this should never happen");
 		}
 		/// <summary>
-		/// Create a non deterministic BIP140 schnorr signature. With Auxiliary random data taken from secure RNG.
+		/// Create a non deterministic BIP340 schnorr signature. With Auxiliary random data taken from secure RNG.
 		/// </summary>
 		/// <param name="msg32">32 bytes message to sign</param>
 		/// <returns>A schnorr signature</returns>
-		public SecpSchnorrSignature SignBIP140(ReadOnlySpan<byte> msg32)
+		public SecpSchnorrSignature SignBIP340(ReadOnlySpan<byte> msg32)
 		{
-			return SignBIP140(msg32, new BIP340NonceFunction(true));
+			return SignBIP340(msg32, new BIP340NonceFunction(true));
 		}
 		/// <summary>
-		/// Create a deterministic BIP140 schnorr signature. With auxiliary random data passed in parameter.
+		/// Create a deterministic BIP340 schnorr signature. With auxiliary random data passed in parameter.
 		/// </summary>
 		/// <param name="msg32">32 bytes message to sign</param>
 		/// <param name="auxData32">Auxiliary random data</param>
 		/// <returns>A schnorr signature</returns>
-		public SecpSchnorrSignature SignBIP140(ReadOnlySpan<byte> msg32, ReadOnlyMemory<byte> auxData32)
+		public SecpSchnorrSignature SignBIP340(ReadOnlySpan<byte> msg32, ReadOnlyMemory<byte> auxData32)
 		{
-			return SignBIP140(msg32, new BIP340NonceFunction(auxData32));
+			return SignBIP340(msg32, new BIP340NonceFunction(auxData32));
 		}
-		public SecpSchnorrSignature SignBIP140(ReadOnlySpan<byte> msg32, INonceFunctionHardened? nonceFunction)
+		public SecpSchnorrSignature SignBIP340(ReadOnlySpan<byte> msg32, INonceFunctionHardened? nonceFunction)
 		{
-			if (TrySignBIP140(msg32, nonceFunction, out var sig) && sig is SecpSchnorrSignature)
+			if (TrySignBIP340(msg32, nonceFunction, out var sig))
 				return sig;
 			throw new InvalidOperationException("Schnorr signature failed, this should never happen");
 		}
+		
+		public bool TrySignBIP340(ReadOnlySpan<byte> msg32, INonceFunctionHardened? nonceFunction, [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out SecpSchnorrSignature signature)
+		{
+			return TrySignBIP340(msg32, null, nonceFunction, out signature);
+		}
 
-		public bool TrySignBIP140(ReadOnlySpan<byte> msg32, INonceFunctionHardened? nonceFunction, out SecpSchnorrSignature? signature)
+		public bool TrySignBIP340(ReadOnlySpan<byte> msg32, ECPubKey? pubkey, INonceFunctionHardened? nonceFunction, [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out SecpSchnorrSignature signature)
 		{
 			signature = null;
 			if (msg32.Length != 32)
@@ -182,7 +187,7 @@ namespace NBitcoin.Secp256k1
 				nonceFunction = new BIP340NonceFunction(true);
 			}
 
-			var pk = CreatePubKey().Q;
+			var pk = (pubkey ?? CreatePubKey()).Q;
 			var sk = this.sec;
 			/* Because we are signing for a x-only pubkey, the secret key is negated
 	* before signing if the point corresponding to the secret key does not
@@ -219,16 +224,16 @@ namespace NBitcoin.Secp256k1
 			e.WriteToSpan(sig64.Slice(32));
 
 			ret &= SecpSchnorrSignature.TryCreate(sig64, out signature);
-			
+
 			k = default;
 			sk = default;
 			sec_key.Fill(0);
 			sig64.Fill(0);
 			if (!ret)
 				signature = null;
-			return ret;
+			return signature is SecpSchnorrSignature;
 		}
-		public bool TrySignSchnorr(ReadOnlySpan<byte> msg32, INonceFunction? nonceFunction, out bool nonceIsNegated, out SecpSchnorrSignature? signature)
+		public bool TrySignSchnorr(ReadOnlySpan<byte> msg32, INonceFunction? nonceFunction, out bool nonceIsNegated, [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out SecpSchnorrSignature signature)
 		{
 			signature = null;
 			nonceIsNegated = false;

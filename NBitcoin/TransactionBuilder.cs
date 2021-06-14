@@ -43,6 +43,11 @@ namespace NBitcoin
 			SigHash = sigHash;
 			EnforceLowR = true;
 		}
+		public SigningOptions(SigHash sigHash, bool useLowR)
+		{
+			SigHash = sigHash;
+			EnforceLowR = useLowR;
+		}
 
 		/// <summary>
 		/// What are we signing (default: SigHash.All)
@@ -70,14 +75,17 @@ namespace NBitcoin
 	{
 		public DefaultCoinSelector()
 		{
-
+			_Rand = new Random();
 		}
-		Random _Rand = new Random();
+
+		Random? _Rand;
+
 		public DefaultCoinSelector(int seed)
 		{
 			_Rand = new Random(seed);
 		}
-		public DefaultCoinSelector(Random random)
+
+		public DefaultCoinSelector(Random? random)
 		{
 			_Rand = random;
 		}
@@ -123,7 +131,8 @@ namespace NBitcoin
 			List<OutputGroup> applicable_groups = new List<OutputGroup>();
 			var nTotalLower = zero;
 			var targetMinChange = target.IsCompatible(MinimumChange) ? target.Add(MinimumChange) : target;
-			Utils.Shuffle(groups, _Rand);
+			if (_Rand != null)
+				Utils.Shuffle(groups, _Rand);
 
 			foreach (var group in groups)
 			{
@@ -236,7 +245,8 @@ namespace NBitcoin
 						//that the rng is fast. We do not use a constant random sequence,
 						//because there may be some privacy improvement by making
 						//the selection random.
-						if (nPass == 0 ? _Rand.Next(0, 2) == 0 : !vfIncluded[i])
+						if (nPass == 0 ? (_Rand is null || _Rand.Next(0, 2) == 0)
+							: !vfIncluded[i])
 						{
 							nTotal = nTotal.Add(groups[i].Amount);
 							vfIncluded[i] = true;
@@ -339,7 +349,7 @@ namespace NBitcoin
 			public TransactionSignature Sign(PubKey pubKey)
 			{
 				var key = ctx.FindKey(pubKey);
-				var sig = txIn.Sign(key, coin, signingOptions.SigHash, signingOptions.EnforceLowR);
+				var sig = txIn.Sign(key, coin, signingOptions);
 				EmittedSignatures.Add(new SignatureEvent(key.PubKey, sig, txIn));
 				return sig;
 			}
@@ -642,6 +652,18 @@ namespace NBitcoin
 			}
 		}
 
+		internal class CoinWithOptions
+		{
+			public CoinWithOptions(ICoin coin, CoinOptions? options)
+			{
+				Coin = coin;
+				Options = options;
+			}
+
+			public ICoin Coin;
+			public CoinOptions? Options;
+		}
+
 		internal class BuilderGroup
 		{
 			internal TransactionBuilder _Parent;
@@ -651,13 +673,18 @@ namespace NBitcoin
 				FeeWeight = 1.0m;
 			}
 			internal List<Builder> Builders = new List<Builder>();
-			internal Dictionary<OutPoint, ICoin> Coins = new Dictionary<OutPoint, ICoin>();
+			internal Dictionary<OutPoint, CoinWithOptions> CoinsWithOptions = new Dictionary<OutPoint, CoinWithOptions>();
 			internal List<AssetBuilder> IssuanceBuilders = new List<AssetBuilder>();
 			internal Dictionary<AssetId, List<AssetBuilder>> BuildersByAsset = new Dictionary<AssetId, List<AssetBuilder>>();
 			internal Script[] ChangeScript = new Script[3];
 			internal bool sendAllToChange;
 			internal bool preventSetChange;
 			internal MoneyBag FixedFee = new MoneyBag();
+
+			internal IEnumerable<T> CoinsOfType<T>()
+			{
+				return CoinsWithOptions.Values.Select(coinWithOptions => coinWithOptions.Coin).OfType<T>();
+			}
 
 			internal void Shuffle()
 			{
@@ -669,6 +696,12 @@ namespace NBitcoin
 			private void Shuffle<T>(List<T> builders)
 			{
 				Utils.Shuffle(builders, _Parent.ShuffleRandom);
+			}
+
+			public CoinOptions? GetOptions(ICoin coin)
+			{
+				CoinsWithOptions.TryGetValue(coin.Outpoint, out var coinWithOptions);
+				return coinWithOptions?.Options;
 			}
 
 			public MoneyBag CoverOnly
@@ -823,6 +856,13 @@ namespace NBitcoin
 			return this;
 		}
 
+		uint? _Version = 1;
+		public TransactionBuilder SetVersion(uint version)
+		{
+			_Version = version;
+			return this;
+		}
+
 		internal List<Key> _Keys = new List<Key>();
 
 		public TransactionBuilder AddKeys(params ISecret[] keys)
@@ -870,6 +910,21 @@ namespace NBitcoin
 			return this;
 		}
 
+		public TransactionBuilder AddCoin(ICoin coin)
+		{
+			return AddCoin(coin, new CoinOptions());
+		}
+
+		public TransactionBuilder AddCoin(ICoin coin, CoinOptions? options)
+		{
+			if (coin == null)
+				throw new ArgumentNullException(nameof(coin));
+			if (coin.TxOut.ScriptPubKey.IsUnspendable)
+				throw new InvalidOperationException("You cannot add an unspendable coin");
+			CurrentGroup.CoinsWithOptions.AddOrReplace(coin.Outpoint, new CoinWithOptions(coin, options));
+			return this;
+		}
+
 		public TransactionBuilder AddCoins(params ICoin?[] coins)
 		{
 			return AddCoins((IEnumerable<ICoin?>)coins);
@@ -879,11 +934,8 @@ namespace NBitcoin
 		{
 			foreach (var coin in coins)
 			{
-				if (coin is null)
-					continue;
-				if (coin.TxOut.ScriptPubKey.IsUnspendable)
-					throw new InvalidOperationException("You cannot add an unspendable coin");
-				CurrentGroup.Coins.AddOrReplace(coin.Outpoint, coin);
+				if (coin is ICoin)
+					AddCoin(coin);
 			}
 			return this;
 		}
@@ -958,7 +1010,7 @@ namespace NBitcoin
 		{
 			if (scriptPubKey == null)
 				throw new ArgumentNullException(nameof(scriptPubKey));
-			var totalInput = CurrentGroup.Coins.Values.OfType<Coin>().Sum(coin => coin.Amount);
+			var totalInput = CurrentGroup.CoinsOfType<Coin>().Sum(coin => coin.Amount);
 			return Send(scriptPubKey, totalInput).SubtractFees();
 		}
 
@@ -1142,13 +1194,13 @@ namespace NBitcoin
 		[Obsolete("Transaction builder is automatically shuffled")]
 		public TransactionBuilder Shuffle()
 		{
-			DoShuffle();
+			DoShuffleGroups();
 			return this;
 		}
 
-		private void DoShuffle()
+		private void DoShuffleGroups()
 		{
-			if (ShuffleRandom != null)
+			if (ShuffleRandom != null && ShuffleOutputs)
 			{
 				Utils.Shuffle(_BuilderGroups, ShuffleRandom);
 				foreach (var group in _BuilderGroups)
@@ -1287,7 +1339,7 @@ namespace NBitcoin
 				var marker = ctx.GetColorMarker(true);
 				if (ctx.IssuanceCoin == null)
 				{
-					var issuance = ctx.Group.Coins.Values.OfType<IssuanceCoin>().Where(i => i.AssetId == asset.Id).FirstOrDefault();
+					var issuance = ctx.Group.CoinsOfType<IssuanceCoin>().Where(i => i.AssetId == asset.Id).FirstOrDefault();
 					if (issuance == null)
 						throw new InvalidOperationException("No issuance coin for emitting asset found");
 					ctx.IssuanceCoin = issuance;
@@ -1618,7 +1670,7 @@ namespace NBitcoin
 		public Transaction BuildTransaction(bool sign, SigningOptions signingOptions)
 		{
 			int totalRepass = 5;
-			DoShuffle();
+			DoShuffleGroups();
 			TransactionBuildingContext ctx = new TransactionBuildingContext(this);
 			retry:
 			if (_CompletedTransaction != null)
@@ -1629,6 +1681,8 @@ namespace NBitcoin
 			}
 			if (_LockTime != null)
 				ctx.Transaction.LockTime = _LockTime.Value;
+			if (_Version is uint v)
+				ctx.Transaction.Version = v;
 			foreach (var group in _BuilderGroups)
 			{
 				ctx.SetGroup(group);
@@ -1641,7 +1695,7 @@ namespace NBitcoin
 				foreach (var builders in buildersByAsset)
 				{
 					ctx.Zero = new AssetMoney(builders.Key);
-					var coins = group.Coins.Values.OfType<ColoredCoin>().Where(c => c.Amount.Id == builders.Key);
+					var coins = group.CoinsOfType<ColoredCoin>().Where(c => c.Amount.Id == builders.Key);
 					ctx.GetDust = null;
 					var btcSpent = BuildTransaction(ctx, group, builders.Value, coins)
 									.OfType<IColoredCoin>().Select(c => c.Bearer.Amount).Sum();
@@ -1653,9 +1707,9 @@ namespace NBitcoin
 
 				var builderList = group.Builders.ToList();
 				ctx.AddChangeTxOut = SetChange;
-				BuildTransaction(ctx, group, builderList, group.Coins.Values.OfType<Coin>()
-																			.Where(c => c.Amount >= ctx.CurrentGroupContext.MinValue)
-																			.Where(IsEconomical));
+				BuildTransaction(ctx, group, builderList, group.CoinsOfType<Coin>()
+															   .Where(c => c.Amount >= ctx.CurrentGroupContext.MinValue)
+															   .Where(IsEconomical));
 			}
 
 			if (ShuffleRandom != null)
@@ -1848,7 +1902,12 @@ namespace NBitcoin
 					input = ctx.Transaction.Inputs.Add(coin.Outpoint);
 					inputsPerOutpoints.Add(coin.Outpoint, input);
 				}
-				if (OptInRBF)
+				var options = group.GetOptions(coin);
+				if (options?.Sequence is Sequence seq)
+				{
+					input.Sequence = seq;
+				}
+				else if (OptInRBF)
 				{
 					input.Sequence = Sequence.OptInRBF;
 				}
@@ -2112,7 +2171,7 @@ namespace NBitcoin
 
 		public ICoin? FindCoin(OutPoint outPoint)
 		{
-			var result = _BuilderGroups.Select(c => c.Coins.TryGet(outPoint)).FirstOrDefault(r => r != null);
+			var result = _BuilderGroups.Select(c => c.CoinsWithOptions.TryGet(outPoint)).FirstOrDefault(r => r != null)?.Coin;
 			if (result == null && CoinFinder != null)
 				result = CoinFinder(outPoint);
 			return result;
@@ -2189,7 +2248,7 @@ namespace NBitcoin
 				var coin = FindSignableCoin(txin) ?? FindCoin(txin.PrevOut);
 				if (coin == null)
 					throw CoinNotFound(txin);
-				if (coin.GetHashVersion() == HashVersion.Witness)
+				if (!coin.IsMalleable)
 					hasWitness = true;
 				else
 					nonWitnessCount++;
@@ -2258,7 +2317,7 @@ namespace NBitcoin
 
 			if (scriptSigSize == -1)
 				scriptSigSize += coin.TxOut.ScriptPubKey.Length; //Using heurestic to approximate size of unknown scriptPubKey
-			if (coin.GetHashVersion() == HashVersion.Witness)
+			if (!coin.IsMalleable)
 			{
 				baseSize += new Protocol.VarInt((ulong)p2shPushRedeemSize).GetSerializedSize();
 				witSize += scriptSigSize + new Protocol.VarInt((ulong)(scriptSigSize + segwitPushRedeemSize)).GetSerializedSize();
@@ -2336,7 +2395,7 @@ namespace NBitcoin
 			ScriptCoin? scriptCoin = coin as ScriptCoin;
 
 			Script? signatures = null;
-			if (coin.GetHashVersion() == HashVersion.Witness)
+			if (!coin.IsMalleable)
 			{
 				signatures = txIn.WitScript;
 				if (scriptCoin != null)
@@ -2357,7 +2416,7 @@ namespace NBitcoin
 
 			signatures = CombineScriptSigs(coin, scriptSig, signatures);
 
-			if (coin.GetHashVersion() == HashVersion.Witness)
+			if (!coin.IsMalleable)
 			{
 				txIn.WitScript = signatures;
 				if (scriptCoin != null)

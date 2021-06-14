@@ -181,6 +181,11 @@ namespace NBitcoin
 			return ret;
 		}
 
+		internal ConsensusFactory GetConsensusFactory()
+		{
+			return Network.Consensus.ConsensusFactory;
+		}
+
 		public Network Network { get; }
 
 		private PSBT(Transaction transaction, Network network)
@@ -220,7 +225,6 @@ namespace NBitcoin
 			// It will be reassigned in `ReadWriteAsVarString` so no worry to assign 0 length array here.
 			byte[] k = new byte[0];
 			byte[] v = new byte[0];
-			var txFound = false;
 			stream.ReadWriteAsVarString(ref k);
 			while (k.Length != 0)
 			{
@@ -240,7 +244,6 @@ namespace NBitcoin
 							throw new FormatException("Malformed global tx. Unexpected size.");
 						if (tx.Inputs.Any(txin => txin.ScriptSig != Script.Empty || txin.WitScript != WitScript.Empty))
 							throw new FormatException("Malformed global tx. It should not contain any scriptsig or witness by itself");
-						txFound = true;
 						break;
 					case PSBTConstants.PSBT_GLOBAL_XPUB when XPubVersionBytes != null:
 						if (k.Length != 1 + XPubVersionBytes.Length + 74)
@@ -264,7 +267,7 @@ namespace NBitcoin
 				}
 				stream.ReadWriteAsVarString(ref k);
 			}
-			if (!txFound)
+			if (tx is null)
 				throw new FormatException("Invalid PSBT. No global TX");
 
 			int i = 0;
@@ -340,21 +343,14 @@ namespace NBitcoin
 				txsById.TryAdd(tx.GetHash(), tx);
 			foreach (var input in Inputs)
 			{
-				if (input.WitnessUtxo == null && txsById.TryGetValue(input.TxIn.PrevOut.Hash, out var tx))
+				if (txsById.TryGetValue(input.TxIn.PrevOut.Hash, out var tx))
 				{
 					if (input.TxIn.PrevOut.N >= tx.Outputs.Count)
 						continue;
 					var output = tx.Outputs[input.TxIn.PrevOut.N];
-					if (output.ScriptPubKey.IsScriptType(ScriptType.Witness) || input.RedeemScript?.IsScriptType(ScriptType.Witness) is true)
-					{
+					input.NonWitnessUtxo = tx;
+					if (input.GetCoin()?.IsMalleable is false)
 						input.WitnessUtxo = output;
-						input.NonWitnessUtxo = null;
-					}
-					else
-					{
-						input.WitnessUtxo = null;
-						input.NonWitnessUtxo = tx;
-					}
 				}
 			}
 			return this;
@@ -799,30 +795,32 @@ namespace NBitcoin
 			var tx = GetGlobalTransaction();
 			for (int i = 0; i < Inputs.Count; i++)
 			{
+				var utxo = Inputs[i].GetTxOut();
 				if (Inputs[i].IsFinalized())
 				{
 					tx.Inputs[i].ScriptSig = Inputs[i].FinalScriptSig ?? Script.Empty;
-					tx.Inputs[i].WitScript = Inputs[i].WitnessScript ?? Script.Empty;
+					tx.Inputs[i].WitScript = Inputs[i].FinalScriptWitness ?? Script.Empty;
+					if (tx.Inputs[i].ScriptSig == Script.Empty
+						&& (utxo is null || utxo.ScriptPubKey.IsScriptType(ScriptType.P2SH)))
+					{
+						hash = null;
+						return false;
+					}
 				}
-				else if (Inputs[i].NonWitnessUtxo != null)
+				else if (utxo is null ||
+						!Network.Consensus.SupportSegwit)
 				{
 					hash = null;
 					return false;
 				}
-				else if (Network.Consensus.SupportSegwit &&
-					Inputs[i].WitnessUtxo is TxOut utxo &&
-					utxo.ScriptPubKey.IsScriptType(ScriptType.P2SH) &&
-					Inputs[i].GetSignableCoin() is ScriptCoin sc &&
-					sc.GetP2SHRedeem() is Script p2shRedeem)
+				else if (utxo.ScriptPubKey.IsScriptType(ScriptType.P2SH) &&
+					Inputs[i].RedeemScript is Script p2shRedeem &&
+					(p2shRedeem.IsScriptType(ScriptType.P2WSH) ||
+					 p2shRedeem.IsScriptType(ScriptType.P2WPKH)))
 				{
 					tx.Inputs[i].ScriptSig = PayToScriptHashTemplate.Instance.GenerateScriptSig(null as byte[][], p2shRedeem);
 				}
-				else if (Network.Consensus.SupportSegwit &&
-					Inputs[i].WitnessUtxo is TxOut utxo2 &&
-					!utxo2.ScriptPubKey.IsScriptType(ScriptType.P2SH))
-				{
-				}
-				else
+				else if (utxo.ScriptPubKey.IsMalleable)
 				{
 					hash = null;
 					return false;

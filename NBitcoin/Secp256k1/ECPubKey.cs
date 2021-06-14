@@ -341,13 +341,13 @@ namespace NBitcoin.Secp256k1
 			return true;
 		}
 
-		public ECPubKey MultTweak(ReadOnlySpan<byte> tweak)
+		public ECPubKey TweakMul(ReadOnlySpan<byte> tweak)
 		{
-			if (TryMultTweak(tweak, out var r))
+			if (TryTweakMul(tweak, out var r))
 				return r!;
 			throw new ArgumentException(paramName: nameof(tweak), message: "Invalid tweak");
 		}
-		public bool TryMultTweak(ReadOnlySpan<byte> tweak, out ECPubKey? tweakedPubKey)
+		public bool TryTweakMul(ReadOnlySpan<byte> tweak, out ECPubKey? tweakedPubKey)
 		{
 			tweakedPubKey = null;
 			if (tweak.Length != 32)
@@ -405,7 +405,7 @@ namespace NBitcoin.Secp256k1
 			Secp256k1.GEJ res;
 			Secp256k1.GE pt = this.Q;
 			ref readonly Secp256k1.Scalar s = ref key.sec;
-			key.AssertNotDiposed();
+			key.AssertNotDisposed();
 			// Can't happen, NBitcoin enforces invariants.
 			//secp256k1_scalar_set_b32(&s, scalar, &overflow);
 			//if (overflow || secp256k1_scalar_is_zero(&s))

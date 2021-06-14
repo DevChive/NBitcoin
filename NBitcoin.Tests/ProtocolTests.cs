@@ -169,8 +169,7 @@ namespace NBitcoin.Tests
 							var version = (VersionPayload)o;
 							Assert.Equal((ulong)0x1357B43A2C209DDD, version.Nonce);
 							Assert.Equal("", version.UserAgent);
-							Assert.Equal("::ffff:10.0.0.2", version.AddressFrom.Address.ToString());
-							Assert.Equal(8333, version.AddressFrom.Port);
+							Assert.Equal("[::ffff:10.0.0.2]:8333", version.AddressFrom.ToString());
 							Assert.Equal(0x00018155, version.StartHeight);
 							Assert.Equal<uint>(31900, version.Version);
 						})
@@ -240,6 +239,101 @@ namespace NBitcoin.Tests
 				seed.Disconnect();
 				Assert.True(seed.State == NodeState.Offline);
 				Assert.NotNull(seed.TimeOffset);
+			}
+		}
+
+		[Fact]
+		[Trait("Protocol", "Protocol")]
+		public void CanProcessAddressGossip()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode(true);
+				var rpc = node.CreateRPCClient();
+				for (var i = 1; i < 101; i++)
+				{
+					for (var j = 1; j < 101; j++)
+					{
+						var ip = IPAddress.Parse($"{i}.{j}.1.1");
+						rpc.AddPeerAddress(ip, 8333);
+					}
+				}
+
+				using (var nodeClient = node.CreateNodeClient())
+				{
+					nodeClient.VersionHandshake();
+					AddrV2Payload addr;
+					using (var list = nodeClient.CreateListener()
+												.Where(m => m.Message.Payload is AddrV2Payload))
+					{
+						nodeClient.SendMessage(new GetAddrPayload());
+
+						addr = list.ReceivePayload<AddrV2Payload>();
+						Assert.Equal(1000, addr.Addresses.Length);
+					}
+				}
+			}
+		}
+
+		[Fact]
+		[Trait("Protocol", "Protocol")]
+		public void CanHandshakeRestrictNodes()
+		{
+			using (var builder = NodeBuilderEx.Create())
+			{
+				var node = builder.CreateNode(true);
+				var manager = new AddressManager();
+				manager.Add(new NetworkAddress(node.NodeEndpoint), IPAddress.Loopback);
+
+				var nodesRequirement = new NodeRequirement(){ MinStartHeight = 100 };
+				var nodeConnectionParameters = new NodeConnectionParameters()
+				{
+					TemplateBehaviors =
+					{
+						new AddressManagerBehavior(manager)
+						{
+							PeersToDiscover = 1,
+							Mode = AddressManagerBehaviorMode.None
+						}
+					}
+				};
+				var group = new NodesGroup(builder.Network, nodeConnectionParameters, nodesRequirement);
+				group.AllowSameGroup = true;
+				var connecting = WaitConnected(group);
+				try
+				{
+					group.Connect();
+					connecting.GetAwaiter().GetResult();
+				}
+				catch (TaskCanceledException)
+				{
+					// It is expected because no node should connect.
+					Assert.Empty(group.ConnectedNodes); // but we chack it anyway.
+				}
+				finally
+				{
+					group.Disconnect();
+				}
+
+				node.Generate(101);
+				group = new NodesGroup(builder.Network, nodeConnectionParameters, nodesRequirement);
+				group.AllowSameGroup = true;
+				connecting = WaitConnected(group);
+				try
+				{
+					group.Connect();
+					connecting.GetAwaiter().GetResult();
+					Eventually(() =>
+					{
+						Assert.NotEmpty(group.ConnectedNodes);
+						Assert.All(group.ConnectedNodes, connectedNode => 
+							Assert.True(connectedNode.RemoteSocketEndpoint.IsEqualTo(node.NodeEndpoint)));
+					});
+				}
+				finally
+				{
+					group.Disconnect();
+				}
 			}
 		}
 
@@ -590,6 +684,7 @@ namespace NBitcoin.Tests
 
 #if !NOFILEIO
 		[Fact]
+		[Trait("UnitTest", "UnitTest")]
 		public void CanConnectToRandomNode()
 		{
 			Stopwatch watch = new Stopwatch();
@@ -895,6 +990,21 @@ namespace NBitcoin.Tests
 					}
 				}
 			}
+		}
+
+		// Disabled because it relies on tor which make tests shaky
+		//[Fact]
+		//[Trait("UnitTest", "UnitTest")]
+#pragma warning disable xUnit1013 // Public method should be marked as test
+		public async Task CanResolveTor()
+#pragma warning restore xUnit1013 // Public method should be marked as test
+		{
+			var resolver = new DnsSocksResolver(Utils.ParseEndpoint("localhost", 9050));
+			var ex1 = await Assert.ThrowsAsync<SocketException>(async () => await resolver.GetHostAddressesAsync("googlekefwjefjfwqk.com", default));
+			var ex2 = await Assert.ThrowsAsync<SocketException>(async () => await DnsResolver.Instance.GetHostAddressesAsync("googlekefwjefjfwqk.com", default));
+			Assert.Equal(ex1.ErrorCode, ex2.ErrorCode);
+			var ip = await resolver.GetHostAddressesAsync("google.com", default);
+			Assert.NotNull(ip);
 		}
 
 		[Fact]

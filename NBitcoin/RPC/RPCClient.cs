@@ -16,6 +16,7 @@ using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using NBitcoin.Scripting;
 using static NBitcoin.RPC.BlockchainInfo;
 
 namespace NBitcoin.RPC
@@ -56,6 +57,7 @@ namespace NBitcoin.RPC
 		blockchain		verifytxoutproof
 		blockchain		gettxoutsetinfo				Yes
 		blockchain		verifychain
+		blockchain		savemempool					Yes
 
 		------------------ Mining
 		mining			 getblocktemplate
@@ -265,39 +267,20 @@ namespace NBitcoin.RPC
 		static ConcurrentDictionary<Network, string> _DefaultPaths = new ConcurrentDictionary<Network, string>();
 		static RPCClient()
 		{
-#if !NOFILEIO
-			var home = Environment.GetEnvironmentVariable("HOME");
-			var localAppData = Environment.GetEnvironmentVariable("APPDATA");
 
-			if (string.IsNullOrEmpty(home) && string.IsNullOrEmpty(localAppData))
+#if !NOFILEIO
+			var bitcoinFolder = Network.GetDefaultDataFolder("bitcoin");
+			if (bitcoinFolder is null)
 				return;
 
-			if (!string.IsNullOrEmpty(home) && string.IsNullOrEmpty(localAppData))
-			{
-				var bitcoinFolder = Path.Combine(home, ".bitcoin");
+			var mainnet = Path.Combine(bitcoinFolder, ".cookie");
+			RegisterDefaultCookiePath(Network.Main, mainnet);
 
-				var mainnet = Path.Combine(bitcoinFolder, ".cookie");
-				RegisterDefaultCookiePath(Network.Main, mainnet);
+			var testnet = Path.Combine(bitcoinFolder, "testnet3", ".cookie");
+			RegisterDefaultCookiePath(Network.TestNet, testnet);
 
-				var testnet = Path.Combine(bitcoinFolder, "testnet3", ".cookie");
-				RegisterDefaultCookiePath(Network.TestNet, testnet);
-
-				var regtest = Path.Combine(bitcoinFolder, "regtest", ".cookie");
-				RegisterDefaultCookiePath(Network.RegTest, regtest);
-			}
-			else if (!string.IsNullOrEmpty(localAppData))
-			{
-				var bitcoinFolder = Path.Combine(localAppData, "Bitcoin");
-
-				var mainnet = Path.Combine(bitcoinFolder, ".cookie");
-				RegisterDefaultCookiePath(Network.Main, mainnet);
-
-				var testnet = Path.Combine(bitcoinFolder, "testnet3", ".cookie");
-				RegisterDefaultCookiePath(Network.TestNet, testnet);
-
-				var regtest = Path.Combine(bitcoinFolder, "regtest", ".cookie");
-				RegisterDefaultCookiePath(Network.RegTest, regtest);
-			}
+			var regtest = Path.Combine(bitcoinFolder, "regtest", ".cookie");
+			RegisterDefaultCookiePath(Network.RegTest, regtest);
 #endif
 		}
 		public static void RegisterDefaultCookiePath(Network network, string path)
@@ -676,11 +659,74 @@ namespace NBitcoin.RPC
 			return TimeSpan.FromSeconds(res.Result.Value<double>());
 		}
 
+
+		public ScanTxoutSetResponse StartScanTxoutSet(OutputDescriptor descriptor, uint rangeStart = 0,
+			uint rangeEnd = 1000) => StartScanTxoutSetAsync(new[] {descriptor}.AsEnumerable(), rangeStart, rangeEnd).GetAwaiter().GetResult();
+
+		public ScanTxoutSetResponse StartScanTxoutSet(IEnumerable<OutputDescriptor> descriptor,
+			uint rangeStart = 0, uint rangeEnd = 1000)
+			=> StartScanTxoutSetAsync(descriptor, rangeStart, rangeEnd).GetAwaiter().GetResult();
+
+		public Task<ScanTxoutSetResponse> StartScanTxoutSetAsync(OutputDescriptor descriptor, uint rangeStart = 0,
+			uint rangeEnd = 1000) => StartScanTxoutSetAsync(new[] {descriptor}.AsEnumerable(), rangeStart, rangeEnd);
+		public async Task<ScanTxoutSetResponse> StartScanTxoutSetAsync(IEnumerable<OutputDescriptor> descriptor, uint rangeStart = 0, uint rangeEnd = 1000)
+		{
+			if (descriptor == null)
+				throw new ArgumentNullException(nameof(descriptor));
+
+			JArray descriptorsJson = new JArray();
+			foreach (var descObj in descriptor)
+			{
+				JObject descJson = new JObject();
+				descJson.Add(new JProperty("desc", descObj.ToString()));
+				if (descObj.IsRange())
+				{
+					var r = new JArray();
+					r.Add(rangeStart);
+					r.Add(rangeEnd);
+					descJson.Add(new JProperty("range", r));
+				}
+				descriptorsJson.Add(descJson);
+			}
+
+			var result = await SendCommandAsync(RPCOperations.scantxoutset, "start", descriptorsJson);
+			result.ThrowIfError();
+
+			var jobj = result.Result as JObject;
+			var amount = Money.Coins(jobj.Property("total_amount").Value.Value<decimal>());
+			var success = jobj.Property("success").Value.Value<bool>();
+			//searched_items
+
+			var searchedItems = (int)(jobj.Property("txouts") ?? jobj.Property("searched_items")).Value.Value<long>();
+			var outputs = new List<ScanTxoutOutput>();
+			foreach (var unspent in (jobj.Property("unspents").Value as JArray).OfType<JObject>())
+			{
+				OutPoint outpoint = OutPoint.Parse($"{unspent.Property("txid").Value.Value<string>()}-{(int)unspent.Property("vout").Value.Value<long>()}");
+				var a = Money.Coins(unspent.Property("amount").Value.Value<decimal>());
+				int height = (int)unspent.Property("height").Value.Value<long>();
+				var scriptPubKey = Script.FromBytesUnsafe(Encoders.Hex.DecodeData(unspent.Property("scriptPubKey").Value.Value<string>()));
+				outputs.Add(new ScanTxoutOutput()
+				{
+					Coin = new Coin(outpoint, new TxOut(a, scriptPubKey)),
+					Height = height
+				});
+			}
+
+			return new ScanTxoutSetResponse()
+			{
+				Outputs = outputs.ToArray(),
+				TotalAmount = amount,
+				Success = success,
+				SearchedItems = searchedItems
+			};
+		}
+
 		/// <summary>
 		/// Scans the unspent transaction output set for entries that match certain output descriptors.
 		/// </summary>
 		/// <param name="descriptorObjects"></param>
 		/// <returns></returns>
+		[Obsolete("Pass OutputDescriptor[] instead")]
 		public async Task<ScanTxoutSetResponse> StartScanTxoutSetAsync(params ScanTxoutSetObject[] descriptorObjects)
 		{
 			if (descriptorObjects == null)
@@ -733,6 +779,7 @@ namespace NBitcoin.RPC
 		/// </summary>
 		/// <param name="descriptorObjects"></param>
 		/// <returns></returns>
+		[Obsolete("Pass OutputDescriptor[] instead")]
 		public ScanTxoutSetResponse StartScanTxoutSet(params ScanTxoutSetObject[] descriptorObjects)
 		{
 			return StartScanTxoutSetAsync(descriptorObjects).GetAwaiter().GetResult();
@@ -1118,8 +1165,9 @@ namespace NBitcoin.RPC
 					StartingHeight = (int)peer["startingheight"],
 					SynchronizedBlocks = (int)peer["synced_blocks"],
 					SynchronizedHeaders = (int)peer["synced_headers"],
-					IsWhiteListed = (bool)peer["whitelisted"],
+					IsWhiteListed = peer["whitelisted"] != null ? (bool)peer["whitelisted"] : false,
 					BanScore = peer["banscore"] == null ? 0 : (int)peer["banscore"],
+					Permissions = peer["permissions"] is JArray permissions ? permissions.Select(p => p.Value<string>()).ToArray() : new string[0], 
 					Inflight = peer["inflight"].Select(x => uint.Parse((string)x)).ToArray()
 				};
 			}
@@ -1478,7 +1526,8 @@ namespace NBitcoin.RPC
 			{
 				throw new FormatException($"Bogus GetBlockRPCResponse! nTx mismatch (expected: {nTx}. actual: {txids.Count})");
 			}
-			return new GetBlockRPCResponse() {
+			return new GetBlockRPCResponse()
+			{
 				Confirmations = json.Value<int>("confirmations"),
 				Size = json.Value<int>("size"),
 				StrippedSize = json.Value<int>("strippedsize"),
@@ -1642,7 +1691,17 @@ namespace NBitcoin.RPC
 			};
 		}
 
-		private FeeRate AbsurdlyHighFee { get; } = new FeeRate(10_000L);
+		public async Task SaveMempoolAsync()
+		{
+			await SendCommandAsync(RPCOperations.savemempool).ConfigureAwait(false);
+		} 
+
+		public void SaveMempool()
+		{
+			SaveMempoolAsync().GetAwaiter().GetResult();
+		} 
+
+		private FeeRate AbsurdlyHighFee { get; } = new FeeRate(10_000M);
 
 		public MempoolAcceptResult TestMempoolAccept(Transaction transaction, bool allowHighFees = false)
 		{
@@ -2057,37 +2116,24 @@ namespace NBitcoin.RPC
 			}
 			else
 			{
-				// BCH removed estimatesmartfee and removed arguments to estimatefee so special case for them...
-				if (Network.NetworkSet.CryptoCode == "BCH")
+				RPCResponse response = await SendCommandAsync(new RPCRequest(RPCOperations.estimatefee, new object[] { confirmationTarget }), false).ConfigureAwait(false);
+				if (response.Error != null)
 				{
-					var response = await SendCommandAsync(RPCOperations.estimatefee).ConfigureAwait(false);
-					var result = response.Result.Value<decimal>();
-					var money = Money.Coins(result);
-					if (money.Satoshi < 0)
-						return null;
-					return new EstimateSmartFeeResponse() { FeeRate = new FeeRate(money), Blocks = confirmationTarget };
-				}
-				else
-				{
-					RPCResponse response = await SendCommandAsync(new RPCRequest(RPCOperations.estimatefee, new object[] { confirmationTarget }), false).ConfigureAwait(false);
-					if (response.Error != null)
+					if (response.Error.Code is RPCErrorCode.RPC_MISC_ERROR)
 					{
-						if (response.Error.Code is RPCErrorCode.RPC_MISC_ERROR)
-						{
-							// Some shitcoins do not require a parameter to estimatefee anymore
-							response = await SendCommandAsync(RPCOperations.estimatefee).ConfigureAwait(false);
-						}
-						else
-						{
-							response.ThrowIfError();
-						}
+						// Some shitcoins do not require a parameter to estimatefee anymore
+						response = await SendCommandAsync(RPCOperations.estimatefee).ConfigureAwait(false);
 					}
-					var result = response.Result.Value<decimal>();
-					var money = Money.Coins(result);
-					if (money.Satoshi < 0)
-						return null;
-					return new EstimateSmartFeeResponse() { FeeRate = new FeeRate(money), Blocks = confirmationTarget };
+					else
+					{
+						response.ThrowIfError();
+					}
 				}
+				var result = response.Result.Value<decimal>();
+				var money = Money.Coins(result);
+				if (money.Satoshi < 0)
+					return null;
+				return new EstimateSmartFeeResponse() { FeeRate = new FeeRate(money), Blocks = confirmationTarget };
 			}
 		}
 
@@ -2226,7 +2272,10 @@ namespace NBitcoin.RPC
 					var result = (JArray)(await SendCommandAsync(RPCOperations.generate, nBlocks).ConfigureAwait(false)).Result;
 					return result.Select(r => new uint256(r.Value<string>())).ToArray();
 				}
-				catch (RPCException rpc) when (rpc.RPCCode == RPCErrorCode.RPC_METHOD_DEPRECATED || rpc.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND)
+				catch (RPCException rpc) when (
+					rpc.RPCCode == RPCErrorCode.RPC_METHOD_DEPRECATED 
+					|| rpc.RPCCode == RPCErrorCode.RPC_METHOD_NOT_FOUND 
+					|| (rpc.RPCCode == RPCErrorCode.RPC_MISC_ERROR))
 				{
 					var address = await GetNewAddressAsync();
 					return await GenerateToAddressAsync(nBlocks, address);
@@ -2274,25 +2323,30 @@ namespace NBitcoin.RPC
 			await SendCommandAsync(RPCOperations.invalidateblock, blockhash).ConfigureAwait(false);
 		}
 
+#if !NOSOCKET
+
 		/// <summary>
-		/// Marks a transaction and all its in-wallet descendants as abandoned which will allow
-		/// for their inputs to be respent.
+		/// Add the address of a potential peer to the address manager. This RPC is for testing only.
 		/// </summary>
-		/// <param name="txId">the transaction id to be marked as abandoned.</param>
-		public void AbandonTransaction(uint256 txId)
+		public bool AddPeerAddress(IPAddress ip, int port)
 		{
-			SendCommand(RPCOperations.abandontransaction, txId.ToString());
+			if (ip is null) throw new ArgumentNullException(nameof(ip));
+
+			return AddPeerAddressAsync(ip, port).GetAwaiter().GetResult();
 		}
 
 		/// <summary>
-		/// Marks a transaction and all its in-wallet descendants as abandoned which will allow
-		/// for their inputs to be respent.
+		/// Add the address of a potential peer to the address manager. This RPC is for testing only.
 		/// </summary>
-		/// <param name="txId">the transaction id to be marked as abandoned.</param>
-		public async Task AbandonTransactionAsync(uint256 txId)
+		public async Task<bool> AddPeerAddressAsync(IPAddress ip, int port)
 		{
-			await SendCommandAsync(RPCOperations.abandontransaction, txId.ToString()).ConfigureAwait(false);
+			if (ip is null) throw new ArgumentNullException(nameof(ip));
+
+			var result = await SendCommandAsync(RPCOperations.addpeeraddress, ip.ToString(), port).ConfigureAwait(false);
+			return result.Result["success"].Value<bool>();
 		}
+
+#endif 
 
 		#endregion
 	}
@@ -2390,6 +2444,7 @@ namespace NBitcoin.RPC
 		{
 			get; internal set;
 		}
+		public string[] Permissions { get; set; } = new string[0];
 	}
 
 	public class AddedNodeInfo

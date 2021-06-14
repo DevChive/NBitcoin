@@ -117,6 +117,11 @@ namespace NBitcoin.RPC
 		scantxoutset,
 		getmempoolentry,
 		stop,
-		uptime
+		uptime,
+		createwallet,
+		loadwallet,
+		unloadwallet,
+		addpeeraddress,
+		savemempool,
 	}
 }

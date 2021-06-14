@@ -28,6 +28,9 @@ Currently supported altcoins are:
 * ZCoin
 * DogeCash
 * Qtum
+* XDS
+* Althash
+* Neblio
 
 ## How to use?
 
@@ -52,7 +55,7 @@ NBitcoin developers do not test those PRs, so you are responsible to keep it wor
 
 ## How to test?
 
-If you want to test your newly created `Network`, update [WellknownNodeDownloadData](../NBitcoin.Tests/WellknownNodeDownloadData.cs) so the test environment can download binaries and run for your blockchain on regtest.
+If you want to test your newly created `Network`, update [WellknownNodeDownloadData](../NBitcoin.TestFramework/WellknownNodeDownloadData.cs) so the test environment can download binaries and run for your blockchain on regtest.
 
 Then, change [NodeBuilderEx](../NBitcoin.Tests/NodeBuilderEx.cs) like the following example.
 

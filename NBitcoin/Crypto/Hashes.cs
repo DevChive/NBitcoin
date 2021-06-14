@@ -1,4 +1,4 @@
-﻿#if !NO_BC
+#if !NO_BC
 using NBitcoin.BouncyCastle.Crypto.Parameters;
 using NBitcoin.BouncyCastle.Security;
 #endif
@@ -103,13 +103,14 @@ namespace NBitcoin.Crypto
 		#endregion
 
 		#region RIPEMD160
-		private static byte[] RIPEMD160(byte[] data)
+		public static byte[] RIPEMD160(byte[] data)
 		{
 			return RIPEMD160(data, 0, data.Length);
 		}
 
 		public static byte[] RIPEMD160(byte[] data, int count)
 		{
+			if (data == null) throw new ArgumentNullException(nameof(data));
 			return RIPEMD160(data, 0, count);
 		}
 
@@ -670,7 +671,7 @@ namespace NBitcoin.Crypto
 
 		public static byte[] SHA256(byte[] data, int offset, int count)
 		{
-#if USEBC || WINDOWS_UWP || NETSTANDARD1X
+#if USEBC || WINDOWS_UWP || NETSTANDARD1X || NONATIVEHASH
 			Sha256Digest sha256 = new Sha256Digest();
 			sha256.BlockUpdate(data, offset, count);
 			byte[] rv = new byte[32];
@@ -692,7 +693,7 @@ namespace NBitcoin.Crypto
 
 		public static byte[] SHA512(byte[] data, int offset, int count)
 		{
-#if USEBC || WINDOWS_UWP || NETSTANDARD1X
+#if USEBC || WINDOWS_UWP || NETSTANDARD1X || NONATIVEHASH
 			Sha512Digest sha512 = new Sha512Digest();
 			sha512.BlockUpdate(data, offset, count);
 			byte[] rv = new byte[32];
@@ -800,17 +801,33 @@ namespace NBitcoin.Crypto
 		{
 			var mac = new NBitcoin.BouncyCastle.Crypto.Macs.HMac(new Sha512Digest());
 			mac.Init(new KeyParameter(key));
-			mac.Update(data);
+			mac.BlockUpdate(data, 0, data.Length);
 			byte[] result = new byte[mac.GetMacSize()];
 			mac.DoFinal(result, 0);
 			return result;
 		}
-
+#if HAS_SPAN
+		public static bool HMACSHA512(byte[] key, ReadOnlySpan<byte> data, Span<byte> output, out int outputLength)
+		{
+			outputLength = 0;
+			var mac = new NBitcoin.BouncyCastle.Crypto.Macs.HMac(new Sha512Digest());
+			var macSize = mac.GetMacSize();
+			if (output.Length < macSize)
+				return false;
+			mac.Init(new KeyParameter(key));
+			mac.BlockUpdate(data.ToArray(), 0, data.Length);
+			byte[] result = new byte[macSize];
+			mac.DoFinal(result, 0);
+			result.CopyTo(result);
+			outputLength = result.Length;
+			return true;
+		}
+#endif
 		public static byte[] HMACSHA256(byte[] key, byte[] data)
 		{
 			var mac = new NBitcoin.BouncyCastle.Crypto.Macs.HMac(new Sha256Digest());
 			mac.Init(new KeyParameter(key));
-			mac.Update(data);
+			mac.BlockUpdate(data, 0, data.Length);
 			byte[] result = new byte[mac.GetMacSize()];
 			mac.DoFinal(result, 0);
 			return result;

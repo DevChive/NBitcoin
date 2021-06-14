@@ -58,7 +58,7 @@ namespace NBitcoin
 							throw new FormatException("Invalid PSBTInput. Contains illegal value in key for NonWitnessUTXO");
 						if (non_witness_utxo != null)
 							throw new FormatException("Invalid PSBTInput. Duplicate non_witness_utxo");
-						non_witness_utxo = this.GetConsensusFactory().CreateTransaction();
+						non_witness_utxo = Parent.GetConsensusFactory().CreateTransaction();
 						non_witness_utxo.FromBytes(v);
 						break;
 					case PSBTConstants.PSBT_IN_WITNESS_UTXO:
@@ -66,7 +66,7 @@ namespace NBitcoin
 							throw new FormatException("Invalid PSBTInput. Contains illegal value in key for WitnessUTXO");
 						if (witness_utxo != null)
 							throw new FormatException("Invalid PSBTInput. Duplicate witness_utxo");
-						if (this.GetConsensusFactory().TryCreateNew<TxOut>(out var txout))
+						if (Parent.GetConsensusFactory().TryCreateNew<TxOut>(out var txout))
 						{
 							witness_utxo = txout;
 						}
@@ -306,7 +306,7 @@ namespace NBitcoin
 				}
 			}
 			if (Parent.Network.Consensus.NeverNeedPreviousTxForSigning ||
-				coin.GetHashVersion() == HashVersion.Witness || witness_script != null)
+				!coin.IsMalleable || witness_script != null)
 			{
 				witness_utxo = coin.TxOut;
 				non_witness_utxo = null;
@@ -501,11 +501,11 @@ namespace NBitcoin
 					errors.Add(new PSBTError(Index, "Input finalized, but witness script is not null"));
 			}
 
-			if (witness_script != null && witness_utxo == null)
-				errors.Add(new PSBTError(Index, "witness script present but no witness utxo"));
+			if (witness_script != null && witness_utxo is null && non_witness_utxo is null)
+				errors.Add(new PSBTError(Index, "witness script present but not witness_utxo or non_witness_utxo"));
 
-			if (final_script_witness != null && witness_utxo == null)
-				errors.Add(new PSBTError(Index, "final witness script present but no witness utxo"));
+			if (final_script_witness != null && witness_utxo is null && non_witness_utxo is null)
+				errors.Add(new PSBTError(Index, "final witness script present but not witness_utxo or non_witness_utxo"));
 
 			if (NonWitnessUtxo != null)
 			{
@@ -708,12 +708,10 @@ namespace NBitcoin
 		{
 			MemoryStream ms = new MemoryStream();
 			var bs = new BitcoinStream(ms, true);
-			bs.ConsensusFactory = Parent.tx.GetConsensusFactory();
+			bs.ConsensusFactory = Parent.GetConsensusFactory();
 			this.Serialize(bs);
 			return ms.ToArrayEfficient();
 		}
-
-		public virtual ConsensusFactory GetConsensusFactory() => Bitcoin.Instance.Mainnet.Consensus.ConsensusFactory;
 
 		internal void Write(JsonTextWriter jsonWriter)
 		{
@@ -934,7 +932,7 @@ namespace NBitcoin
 				return false;
 
 			if (Parent.Network.Consensus.NeverNeedPreviousTxForSigning ||
-				coin.GetHashVersion() == HashVersion.Witness)
+				!coin.IsMalleable)
 			{
 				if (WitnessUtxo == null)
 				{

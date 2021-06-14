@@ -60,6 +60,12 @@ namespace NBitcoin.Protocol
 			set;
 		}
 
+		public int? MinStartHeight
+		{
+			get;
+			set;
+		}
+
 		public bool SupportSPV
 		{
 			get;
@@ -80,6 +86,12 @@ namespace NBitcoin.Protocol
 			if (SupportSPV)
 			{
 				if (capabilities.SupportNodeBloom && ((version.Services & NodeServices.NODE_BLOOM) == 0))
+					return false;
+			}
+
+			if (MinStartHeight is { } minStartHeight)
+			{
+				if (version.StartHeight < minStartHeight)
 					return false;
 			}
 
@@ -221,10 +233,13 @@ namespace NBitcoin.Protocol
 							{
 								Logs.NodeServer.LogTrace("Sending message {message}", message);
 							}
+							var addrV2Support = Node.PreferAddressV2
+									? NetworkAddress.AddrV2Format
+									: 0;
 							MemoryStream ms = new MemoryStream();
 							message.ReadWrite(new BitcoinStream(ms, true)
 							{
-								ProtocolVersion = Node.Version,
+								ProtocolVersion = Node.Version | addrV2Support,
 								TransactionOptions = Node.SupportedTransactionOptions,
 								ConsensusFactory = Node.Network.Consensus.ConsensusFactory
 							});
@@ -542,12 +557,16 @@ namespace NBitcoin.Protocol
 		/// <param name="parameters">The parameters used by the found node</param>
 		/// <param name="connectedEndpoints">The already connected endpoints, the new endpoint will be select outside of existing groups</param>
 		/// <returns></returns>
-		public static Node Connect(Network network, AddressManager addrman, NodeConnectionParameters parameters = null, IPEndPoint[] connectedEndpoints = null)
+		public static Node Connect(Network network, AddressManager addrman, NodeConnectionParameters parameters = null, EndPoint[] connectedEndpoints = null)
 		{
 			parameters = parameters ?? new NodeConnectionParameters();
 			AddressManagerBehavior.SetAddrman(parameters, addrman);
 			return Connect(network, parameters, connectedEndpoints);
 		}
+
+		static bool SupportSocks(NodeConnectionParameters parameters) =>
+			parameters?.TemplateBehaviors.Find<SocksSettingsBehavior>() is SocksSettingsBehavior b &&
+			b.SocksEndpoint != null;
 
 		/// <summary>
 		/// Connect to a random node on the network
@@ -557,13 +576,23 @@ namespace NBitcoin.Protocol
 		/// <param name="connectedEndpoints">The already connected endpoints, the new endpoint will be select outside of existing groups</param>
 		/// <param name="getGroup">Group selector, by default NBicoin.IpExtensions.GetGroup</param>
 		/// <returns></returns>
-		public static Node Connect(Network network, NodeConnectionParameters parameters = null, IPEndPoint[] connectedEndpoints = null, Func<IPEndPoint, byte[]> getGroup = null)
+		public static Node Connect(Network network, NodeConnectionParameters parameters = null, EndPoint[] connectedEndpoints = null, Func<EndPoint, byte[]> getGroup = null)
 		{
-			getGroup = getGroup ?? new Func<IPEndPoint, byte[]>((a) => IpExtensions.GetGroup(a.Address));
+			getGroup = getGroup ?? new Func<EndPoint, byte[]>((a) => a.GetGroup());
 			connectedEndpoints = connectedEndpoints ?? new IPEndPoint[0];
 			parameters = parameters ?? new NodeConnectionParameters();
 			var addrmanBehavior = parameters.TemplateBehaviors.FindOrCreate(() => new AddressManagerBehavior(new AddressManager()));
 			var addrman = AddressManagerBehavior.GetAddrman(parameters);
+			bool hasSocks = false;
+			var socks = parameters.TemplateBehaviors.Find<SocksSettingsBehavior>();
+			if (socks != null && socks.SocksEndpoint != null)
+			{
+				hasSocks = true;
+				if (addrman.DnsResolver is null)
+				{
+					addrman.DnsResolver = socks.CreateDnsResolver();
+				}
+			}
 			DateTimeOffset start = DateTimeOffset.UtcNow;
 			while (true)
 			{
@@ -575,9 +604,11 @@ namespace NBitcoin.Protocol
 				}
 				NetworkAddress addr = null;
 				int groupFail = 0;
+				int socksFail = 0;
 				while (true)
 				{
-					if (groupFail > 50)
+					
+					if (groupFail > 50 || socksFail > 50)
 					{
 						parameters.ConnectCancellation.WaitHandle.WaitOne((int)TimeSpan.FromSeconds(60).TotalMilliseconds);
 						break;
@@ -588,8 +619,16 @@ namespace NBitcoin.Protocol
 						parameters.ConnectCancellation.WaitHandle.WaitOne(1000);
 						break;
 					}
-					if (!addr.Endpoint.Address.IsValid())
+					if (!addr.Endpoint.IsValid())
 						continue;
+					if (!hasSocks &&
+						addr.AddressType != NetworkAddressType.IPv4 &&
+						addr.AddressType != NetworkAddressType.IPv6)
+					{
+						socksFail++;
+						continue;
+					}
+
 					var groupExist = connectedEndpoints.Any(a => getGroup(a).SequenceEqual(getGroup(addr.Endpoint)));
 					if (groupExist)
 					{
@@ -607,7 +646,7 @@ namespace NBitcoin.Protocol
 					using (var cts = CancellationTokenSource.CreateLinkedTokenSource(parameters.ConnectCancellation, timeout.Token))
 					{
 						param2.ConnectCancellation = cts.Token;
-						var node = Node.Connect(network, addr.Endpoint, param2);
+						var node = Node.Connect(network, addr, param2);
 						return node;
 					}
 				}
@@ -615,6 +654,10 @@ namespace NBitcoin.Protocol
 				{
 					if (ex.CancellationToken == parameters.ConnectCancellation)
 						throw;
+				}
+				catch (InvalidOperationException)
+				{
+					// Happen when we ask connecting to a tor node, but without socks
 				}
 				catch (SocketException)
 				{
@@ -663,11 +706,41 @@ namespace NBitcoin.Protocol
 			return Connect(network, Utils.ParseEndpoint(endpoint, network.DefaultPort), myVersion, isRelay, cancellation);
 		}
 
+
+		public static Task<Node> ConnectAsync(Network network,
+							 NetworkAddress endpoint,
+							 NodeConnectionParameters parameters)
+		{
+			if (endpoint == null)
+				throw new ArgumentNullException(nameof(endpoint));
+			string error = null;
+			if (endpoint.AddressType == NetworkAddressType.IPv4 ||
+				endpoint.AddressType == NetworkAddressType.IPv6)
+			{
+				error = null;
+			}
+			if (endpoint.AddressType == NetworkAddressType.Unroutable)
+			{
+				if (!endpoint.Endpoint.IsRoutable(true))
+					error = "The endpoint is not routable locally";
+			}
+			if (endpoint.AddressType == NetworkAddressType.Onion ||
+				endpoint.AddressType == NetworkAddressType.I2P ||
+				endpoint.AddressType == NetworkAddressType.Cjdns)
+			{
+				if (!SupportSocks(parameters))
+					error = $"The endpoint address type is {endpoint.AddressType}, but no socks proxy has been configured";
+			}
+			if (error is string)
+				throw new InvalidOperationException(error);
+			return ConnectAsync(network, endpoint.Endpoint, parameters);
+		}
 		public static Node Connect(Network network,
 							 NetworkAddress endpoint,
 							 NodeConnectionParameters parameters)
 		{
-			return ConnectAsync(network, endpoint?.Endpoint, endpoint, parameters).GetAwaiter().GetResult();
+
+			return ConnectAsync(network, endpoint, parameters).GetAwaiter().GetResult();
 		}
 
 		public static Node Connect(Network network,
@@ -713,12 +786,10 @@ namespace NBitcoin.Protocol
 				var expectedPeerEndpoint = (endpoint as IPEndPoint) ?? endpoint.AsOnionCatIPEndpoint() ?? (socket.RemoteEndPoint as IPEndPoint);
 				if (peer is null)
 				{
-					peer = new NetworkAddress()
+					peer = new NetworkAddress(expectedPeerEndpoint)
 					{
 						Time = DateTimeOffset.UtcNow,
-						Endpoint = expectedPeerEndpoint
 					};
-					peer.Endpoint = expectedPeerEndpoint;
 				}
 				else if (!expectedPeerEndpoint.MapToIPv6Ex().Equals(peer.Endpoint))
 				{
@@ -742,7 +813,6 @@ namespace NBitcoin.Protocol
 				throw;
 			}
 
-			var destinationEndpoint = endpoint.AsOnionCatIPEndpoint() ?? ((IPEndPoint)socket.RemoteEndPoint);
 			Node node = new Node(peer, network, parameters, socket, null);
 			return node;
 		}
@@ -770,9 +840,12 @@ namespace NBitcoin.Protocol
 
 		internal Node(NetworkAddress peer, Network network, NodeConnectionParameters parameters, Socket socket, VersionPayload peerVersion)
 		{
-			_RemoteSocketAddress = peer.Endpoint.Address;
 			_RemoteSocketEndpoint = peer.Endpoint;
-			_RemoteSocketPort = peer.Endpoint.Port;
+			if (peer.Endpoint is IPEndPoint ip)
+			{
+				_RemoteSocketAddress = ip.Address;
+				_RemoteSocketPort = ip.Port;
+			}
 			_Peer = peer;
 			Inbound = peerVersion != null;
 			Network = network;
@@ -1036,8 +1109,10 @@ namespace NBitcoin.Protocol
 				_PeerVersion = version;
 				SetVersion(Math.Min(MyVersion.Version, version.Version));
 
-				if (!version.AddressReceiver.Address.Equals(MyVersion.AddressFrom.Address))
-					Logs.NodeServer.LogWarning("Different external address detected by the node {addressReceiver} instead of {addressFrom}", version.AddressReceiver.Address, MyVersion.AddressFrom.Address);
+				var receiverAddress = version.AddressReceiver.GetStringAddress();
+				var addressFrom = MyVersion.AddressFrom.GetStringAddress();
+				if (receiverAddress != addressFrom)
+					Logs.NodeServer.LogWarning($"Different external address detected by the node {receiverAddress} instead of {addressFrom}");
 
 				if (ProtocolCapabilities.PeerTooOld)
 				{
@@ -1052,17 +1127,29 @@ namespace NBitcoin.Protocol
 					return;
 				}
 
-				SendMessageAsync(new VerAckPayload());
-				listener.ReceivePayload<VerAckPayload>(cancellationToken);
-				State = NodeState.HandShaked;
-				if (Advertize && MyVersion.AddressFrom.Address.IsRoutable(true))
+				// As a cortesy we do not send sendaddr to nodes that do not support it.
+				if (ProtocolCapabilities.SupportAddrv2)
 				{
+					// Signal ADDRv2 support (BIP155).
+					SendMessageAsync(new SendAddrV2Payload());
+				}
+
+				SendMessageAsync(new VerAckPayload());
+
+				listener.ReceivePayload<VerAckPayload>(cancellationToken);
+
+				State = NodeState.HandShaked;
+
+				if (Advertize)
+				{
+					if (MyVersion.AddressFrom is IPEndPoint iPEndPoint && !iPEndPoint.Address.IsRoutable(true))
+						return;
+
 					SendMessageAsync(new AddrPayload(new NetworkAddress(MyVersion.AddressFrom)
 					{
 						Time = DateTimeOffset.UtcNow
 					}));
 				}
-
 			}
 		}
 
@@ -1085,6 +1172,13 @@ namespace NBitcoin.Protocol
 					throw new ProtocolException("Version rejected " + reject.Code + " : " + reject.Reason);
 				SendMessageAsync(new VerAckPayload());
 				State = NodeState.HandShaked;
+
+				// As a courtesy we do not send sendaddr to nodes that do not support it.
+				if (ProtocolCapabilities.SupportAddrv2)
+				{
+					// Signal ADDRv2 support (BIP155).
+					SendMessageAsync(new SendAddrV2Payload());
+				}
 			}
 		}
 
@@ -1157,6 +1251,16 @@ namespace NBitcoin.Protocol
 			{
 				return _SupportedTransactionOptions;
 			}
+		}
+
+
+		/// <summary>
+		/// Transaction options supported by the peer
+		/// </summary>
+		public bool PreferAddressV2
+		{
+			get;
+			internal set;
 		}
 
 		/// <summary>

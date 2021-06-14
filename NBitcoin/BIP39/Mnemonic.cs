@@ -52,7 +52,7 @@ namespace NBitcoin
 
 			var i = Array.IndexOf(entArray, entropy.Length * 8);
 			if (i == -1)
-				throw new ArgumentException("The length for entropy should be : " + String.Join(",", entArray), "entropy");
+				throw new ArgumentException("The length for entropy should be " + String.Join(",", entArray) + " bits", "entropy");
 
 			int cs = csArray[i];
 			byte[] checksum = Hashes.SHA256(entropy);
@@ -112,32 +112,6 @@ namespace NBitcoin
 		private static bool CorrectWordCount(int ms)
 		{
 			return msArray.Any(_ => _ == ms);
-		}
-
-
-		// FIXME: this method is not used. Shouldn't we delete it?
-		private int ToInt(BitArray bits)
-		{
-			if (bits.Length != 11)
-			{
-				throw new InvalidOperationException("should never happen, bug in nbitcoin");
-			}
-
-			int number = 0;
-			int base2Divide = 1024; //it's all downhill from here...literally we halve this for each bit we move to.
-
-			//literally picture this loop as going from the most significant bit across to the least in the 11 bits, dividing by 2 for each bit as per binary/base 2
-			foreach (bool b in bits)
-			{
-				if (b)
-				{
-					number = number + base2Divide;
-				}
-
-				base2Divide = base2Divide / 2;
-			}
-
-			return number;
 		}
 
 		private readonly Wordlist _WordList;
